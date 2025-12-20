@@ -1,0 +1,7 @@
+.env
+bot_database.db
+server_data.json
+__pycache__
+*.log
+*.pyc
+*.pyo
