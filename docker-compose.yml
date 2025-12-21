@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    container_name: felix_bot
+    restart: always
+    volumes:
+      # This ensures your database persists even if you restart the container
+      - ./bot_database.db:/app/bot_database.db
+    env_file:
+      - .env
