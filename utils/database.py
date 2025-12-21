@@ -23,6 +23,7 @@ async def initialize_database():
                     username TEXT
                 )
             """)
+
             # 2. Mod Logs
             await cursor.execute("""
                 CREATE TABLE IF NOT EXISTS mod_logs (
@@ -34,6 +35,7 @@ async def initialize_database():
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
             # 3. Levels
             await cursor.execute("""
                 CREATE TABLE IF NOT EXISTS levels (
@@ -43,6 +45,7 @@ async def initialize_database():
                     level INTEGER DEFAULT 1
                 )
             """)
+
             # 4. Gacha Profile
             await cursor.execute("""
                 CREATE TABLE IF NOT EXISTS game_profile (
@@ -52,21 +55,40 @@ async def initialize_database():
                     coins INTEGER DEFAULT 0
                 )
             """)
-            # 5. Collection
+
+            # 5. Collection (With Shiny Support)
             await cursor.execute("""
                 CREATE TABLE IF NOT EXISTS collection (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_uuid TEXT,
                     pokemon_id INTEGER,
                     pokemon_name TEXT,
+                    is_shiny BOOLEAN DEFAULT 0,
+                    is_legendary BOOLEAN DEFAULT 0,
                     caught_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # --- MIGRATION: Force Add Columns if Missing ---
+            # This fixes your error!
+            try:
+                await cursor.execute(
+                    "ALTER TABLE collection ADD COLUMN is_shiny BOOLEAN DEFAULT 0"
+                )
+            except aiosqlite.OperationalError:
+                pass  # Column already exists, ignore error
+
+            try:
+                await cursor.execute(
+                    "ALTER TABLE collection ADD COLUMN is_legendary BOOLEAN DEFAULT 0"
+                )
+            except aiosqlite.OperationalError:
+                pass
+
         await db.commit()
         print(f"--- Database Initialized (WAL Mode) at {DB_NAME} ---")
 
 
-# CHANGED: Now requires 'db' passed in as an argument
 async def get_or_create_uuid(db, discord_id: int, username: str = None):
     async with db.cursor() as cursor:
         await cursor.execute(
@@ -81,7 +103,6 @@ async def get_or_create_uuid(db, discord_id: int, username: str = None):
                     "UPDATE users SET username = ? WHERE discord_id = ?",
                     (username, discord_id),
                 )
-                # Note: We do NOT commit here. The caller handles the commit.
             return uuid_str
         else:
             new_uuid = str(uuid.uuid4())
@@ -89,5 +110,4 @@ async def get_or_create_uuid(db, discord_id: int, username: str = None):
                 "INSERT INTO users (user_uuid, discord_id, username) VALUES (?, ?, ?)",
                 (new_uuid, discord_id, username),
             )
-            # Note: We do NOT commit here. The caller handles the commit.
             return new_uuid
