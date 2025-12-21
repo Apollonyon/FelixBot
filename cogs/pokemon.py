@@ -113,6 +113,7 @@ LEGENDARY_IDS = [
 
 SHINY_CHANCE = 0.05
 LEGENDARY_CHANCE = 0.02
+EVOLUTION_COST = 3  # You need 3 duplicates to evolve 1
 
 
 # --- HELPER: Image Collage ---
@@ -161,18 +162,13 @@ class BoxView(discord.ui.View):
         end = start + self.items_per_page
         page_data = self.full_data[start:end]
 
-        desc = "Use the **ID** to rename, set buddy, or trade!\n\n"
+        desc = "Use the **ID** to rename, buddy, or trade!\n\n"
         for row in page_data:
             unique_id, p_id, name, shiny, nickname = row
-
-            # Name Logic: "Sparky (Pikachu)" or just "Pikachu"
             display_name = f"**{nickname}** ({name})" if nickname else f"**{name}**"
-
             icon = "✨" if shiny else ""
-            is_legendary = p_id in LEGENDARY_IDS
-            if is_legendary:
+            if p_id in LEGENDARY_IDS:
                 display_name = f"🔥 {display_name} 🔥"
-
             desc += f"`ID: {unique_id}` — {display_name} {icon}\n"
 
         embed = discord.Embed(
@@ -189,20 +185,14 @@ class BoxView(discord.ui.View):
     async def prev_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        if self.page > 0:
-            self.page -= 1
-        else:
-            self.page = self.total_pages - 1
+        self.page = self.page - 1 if self.page > 0 else self.total_pages - 1
         await interaction.response.edit_message(embed=self.get_embed())
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.primary)
     async def next_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        if self.page < self.total_pages - 1:
-            self.page += 1
-        else:
-            self.page = 0
+        self.page = self.page + 1 if self.page < self.total_pages - 1 else 0
         await interaction.response.edit_message(embed=self.get_embed())
 
 
@@ -232,7 +222,6 @@ class TradeView(discord.ui.View):
         partner_uuid = await get_or_create_uuid(db, self.partner.id, self.partner.name)
 
         async with db.cursor() as cursor:
-            # Check ownership
             await cursor.execute(
                 "SELECT user_uuid FROM collection WHERE id = ?", (self.author_poke_id,)
             )
@@ -242,21 +231,18 @@ class TradeView(discord.ui.View):
             )
             check_b = await cursor.fetchone()
 
-            if not check_a or check_a[0] != author_uuid:
+            if (
+                not check_a
+                or check_a[0] != author_uuid
+                or not check_b
+                or check_b[0] != partner_uuid
+            ):
                 await interaction.response.send_message(
-                    "❌ Trade Failed: Original owner no longer has the Pokemon!",
-                    ephemeral=True,
-                )
-                return
-            if not check_b or check_b[0] != partner_uuid:
-                await interaction.response.send_message(
-                    "❌ Trade Failed: Partner no longer has the Pokemon!",
-                    ephemeral=True,
+                    "❌ Trade Failed: Ownership changed!", ephemeral=True
                 )
                 return
 
-            # Execute Swap
-            # NOTE: When trading, we CLEAR the Buddy status if that pokemon was a buddy
+            # Clear Buddy status before trading
             await cursor.execute(
                 "UPDATE game_profile SET buddy_id = NULL WHERE buddy_id = ?",
                 (self.author_poke_id,),
@@ -276,21 +262,17 @@ class TradeView(discord.ui.View):
             )
 
         await db.commit()
-
         self.value = True
         self.stop()
         await interaction.response.edit_message(
-            content=f"🤝 **Trade Complete!**\n{self.author.mention} ↔ {self.partner.mention}\n(Note: Buddy status was reset for traded Pokemon)",
+            content=f"🤝 **Trade Complete!**\n{self.author.mention} ↔ {self.partner.mention}",
             view=None,
             embed=None,
         )
 
     @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if (
-            interaction.user.id != self.partner.id
-            and interaction.user.id != self.author.id
-        ):
+        if interaction.user.id not in [self.partner.id, self.author.id]:
             return
         self.value = False
         self.stop()
@@ -317,17 +299,16 @@ class PokemonGame(commands.Cog):
     async def fetch_pokemon(self, session):
         is_legendary = random.random() < LEGENDARY_CHANCE
         is_shiny = random.random() < SHINY_CHANCE
-
-        if is_legendary:
-            poke_id = random.choice(LEGENDARY_IDS)
-        else:
-            poke_id = random.choice(self.NON_LEGENDARY_IDS)
+        poke_id = (
+            random.choice(LEGENDARY_IDS)
+            if is_legendary
+            else random.choice(self.NON_LEGENDARY_IDS)
+        )
 
         url = f"https://pokeapi.co/api/v2/pokemon/{poke_id}"
         async with session.get(url) as response:
             if response.status == 200:
                 data = await response.json()
-
                 sprite_url = (
                     data["sprites"]["front_shiny"]
                     if is_shiny
@@ -345,43 +326,176 @@ class PokemonGame(commands.Cog):
                 }
             return None
 
-    # --- NEW: RENAME ---
-    @pokemon_group.command(name="rename", description="Give your Pokemon a nickname")
-    @app_commands.describe(id="The ID from /pokemon box", name="The new nickname")
-    async def rename(self, interaction: discord.Interaction, id: int, name: str):
-        await interaction.response.defer()
-        # Sanitize input (Max 30 chars, no weird stuff)
-        if len(name) > 30:
-            await interaction.followup.send("❌ Nickname too long! Max 30 chars.")
-            return
+    # --- EVOLUTION LOGIC ---
+    async def get_next_evolution(self, session, pokemon_id):
+        # 1. Get Species Data
+        url = f"https://pokeapi.co/api/v2/pokemon-species/{pokemon_id}"
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return None
+            species_data = await resp.json()
 
+        # 2. Get Chain URL
+        chain_url = species_data["evolution_chain"]["url"]
+        async with session.get(chain_url) as resp:
+            if resp.status != 200:
+                return None
+            chain_data = await resp.json()
+
+        chain = chain_data["chain"]
+
+        # 3. Recursive search to find current Pokemon in the tree
+        def find_node(node, target_id):
+            # Extract ID from URL (e.g., https://.../1/)
+            node_id = int(node["species"]["url"].split("/")[-2])
+            if node_id == target_id:
+                return node
+            for child in node["evolves_to"]:
+                res = find_node(child, target_id)
+                if res:
+                    return res
+            return None
+
+        current_node = find_node(chain, pokemon_id)
+
+        # 4. Check if it evolves
+        if not current_node or not current_node["evolves_to"]:
+            return None  # Final evolution already
+
+        # 5. Pick evolution (Random for branching like Eevee)
+        next_node = random.choice(current_node["evolves_to"])
+        next_id = int(next_node["species"]["url"].split("/")[-2])
+        next_name = next_node["species"]["name"].capitalize()
+
+        return next_id, next_name
+
+    # --- COMMANDS ---
+
+    @pokemon_group.command(
+        name="evolve", description="Merge 3 duplicates to get the next evolution!"
+    )
+    @app_commands.describe(name="Name of the Pokemon (e.g. Charmander)")
+    async def evolve(self, interaction: discord.Interaction, name: str):
+        await interaction.response.defer()
+        pokemon_name = name.capitalize()
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
 
         async with self.bot.db.cursor() as cursor:
-            # Check ownership
+            # 1. Check if user has enough duplicates (Need 3)
+            # We sort by is_shiny ASC so we sacrifice Normal ones before Shiny ones!
+            await cursor.execute(
+                """
+                SELECT id, pokemon_id, is_shiny, is_legendary
+                FROM collection
+                WHERE user_uuid = ? AND pokemon_name = ?
+                ORDER BY is_shiny ASC
+                LIMIT ?
+            """,
+                (user_uuid, pokemon_name, EVOLUTION_COST),
+            )
+
+            duplicates = await cursor.fetchall()
+
+            if len(duplicates) < EVOLUTION_COST:
+                await interaction.followup.send(
+                    f"❌ You need **{EVOLUTION_COST}** {pokemon_name} to evolve, but you only have **{len(duplicates)}**."
+                )
+                return
+
+            current_poke_id = duplicates[0][1]
+
+            # 2. Fetch Evolution Data (API)
+            async with aiohttp.ClientSession() as session:
+                evo_result = await self.get_next_evolution(session, current_poke_id)
+
+            if not evo_result:
+                await interaction.followup.send(
+                    f"❌ **{pokemon_name}** cannot evolve any further!"
+                )
+                return
+
+            next_id, next_name = evo_result
+
+            # 3. EXECUTE EVOLUTION
+            # Delete the 3 duplicates
+            ids_to_delete = [d[0] for d in duplicates]
+            placeholders = ",".join("?" * len(ids_to_delete))
+
+            await cursor.execute(
+                f"DELETE FROM collection WHERE id IN ({placeholders})",
+                tuple(ids_to_delete),
+            )
+
+            # Determine Stats of new Pokemon (Inherit Shiny/Legendary if lucky?)
+            # Logic: If you sacrifice a Shiny, the evolution is Shiny.
+            # (Since we ordered by ASC, if the last one is Shiny, it means we used a shiny)
+            is_shiny_evo = any(d[2] for d in duplicates)
+            is_legendary_evo = any(d[3] for d in duplicates)
+
+            # Insert the New Pokemon
+            await cursor.execute(
+                """
+                INSERT INTO collection (user_uuid, pokemon_id, pokemon_name, is_shiny, is_legendary)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                (user_uuid, next_id, next_name, is_shiny_evo, is_legendary_evo),
+            )
+
+        await self.bot.db.commit()
+
+        # Fetch Image for cool embed
+        img_url = ""
+        async with aiohttp.ClientSession() as session:
+            url = f"https://pokeapi.co/api/v2/pokemon/{next_id}"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    d = await resp.json()
+                    img_url = (
+                        d["sprites"]["front_shiny"]
+                        if is_shiny_evo
+                        else d["sprites"]["front_default"]
+                    )
+
+        embed = discord.Embed(
+            title="🧬 Evolution Successful!", color=discord.Color.teal()
+        )
+        embed.description = (
+            f"Your **3x {pokemon_name}** merged into **1x {next_name}**!"
+        )
+        if is_shiny_evo:
+            embed.description += "\n✨ **It's Shiny!**"
+        if img_url:
+            embed.set_thumbnail(url=img_url)
+
+        await interaction.followup.send(embed=embed)
+
+    @pokemon_group.command(name="rename", description="Give your Pokemon a nickname")
+    @app_commands.describe(id="The ID from /pokemon box", name="The new nickname")
+    async def rename(self, interaction: discord.Interaction, id: int, name: str):
+        await interaction.response.defer()
+        if len(name) > 30:
+            await interaction.followup.send("❌ Nickname too long! Max 30 chars.")
+            return
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
+        async with self.bot.db.cursor() as cursor:
             await cursor.execute(
                 "SELECT pokemon_name FROM collection WHERE id = ? AND user_uuid = ?",
                 (id, user_uuid),
             )
             result = await cursor.fetchone()
-
             if not result:
                 await interaction.followup.send(f"❌ You don't own Pokemon ID `{id}`.")
                 return
-
-            original_name = result[0]
             await cursor.execute(
                 "UPDATE collection SET nickname = ? WHERE id = ?", (name, id)
             )
-
         await self.bot.db.commit()
-        await interaction.followup.send(
-            f"✅ ID `{id}` ({original_name}) is now known as **{name}**!"
-        )
+        await interaction.followup.send(f"✅ ID `{id}` is now **{name}**!")
 
-    # --- NEW: BUDDY SYSTEM ---
     @pokemon_group.command(name="buddy", description="Set your Partner Pokemon")
     @app_commands.describe(id="The ID from /pokemon box")
     async def buddy(self, interaction: discord.Interaction, id: int):
@@ -389,23 +503,14 @@ class PokemonGame(commands.Cog):
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
-
         async with self.bot.db.cursor() as cursor:
-            # Check ownership
             await cursor.execute(
-                "SELECT pokemon_name, nickname FROM collection WHERE id = ? AND user_uuid = ?",
+                "SELECT pokemon_name FROM collection WHERE id = ? AND user_uuid = ?",
                 (id, user_uuid),
             )
-            result = await cursor.fetchone()
-
-            if not result:
+            if not await cursor.fetchone():
                 await interaction.followup.send(f"❌ You don't own Pokemon ID `{id}`.")
                 return
-
-            name = result[1] if result[1] else result[0]
-
-            # Set in profile
-            # We use INSERT OR IGNORE to ensure profile exists, then UPDATE
             await cursor.execute(
                 "INSERT OR IGNORE INTO game_profile (user_uuid) VALUES (?)",
                 (user_uuid,),
@@ -414,54 +519,44 @@ class PokemonGame(commands.Cog):
                 "UPDATE game_profile SET buddy_id = ? WHERE user_uuid = ?",
                 (id, user_uuid),
             )
-
         await self.bot.db.commit()
-        await interaction.followup.send(f"❤️ **{name}** is now your Buddy!")
+        await interaction.followup.send(f"❤️ Buddy Updated!")
 
-    # --- NEW: PROFILE (TRAINER CARD) ---
     @pokemon_group.command(name="profile", description="View your Trainer Card")
     async def profile(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
-
         async with self.bot.db.cursor() as cursor:
-            # Fetch Coins, Pulls, and Buddy ID
             await cursor.execute(
                 "SELECT coins, available_pulls, buddy_id FROM game_profile WHERE user_uuid = ?",
                 (user_uuid,),
             )
-            profile_data = await cursor.fetchone()
-
-            if not profile_data:
-                await interaction.followup.send("You haven't started playing yet!")
+            data = await cursor.fetchone()
+            if not data:
+                await interaction.followup.send("Start playing first!")
                 return
+            coins, pulls, buddy_id = data
 
-            coins, pulls, buddy_id = profile_data
-
-            # Fetch Buddy Details if exists
-            buddy_img = None
-            buddy_name = "None"
+            buddy_img, buddy_name = None, "None"
             if buddy_id:
                 await cursor.execute(
                     "SELECT pokemon_id, pokemon_name, nickname, is_shiny FROM collection WHERE id = ?",
                     (buddy_id,),
                 )
-                buddy_data = await cursor.fetchone()
-                if buddy_data:
-                    p_id, p_name, p_nick, is_shiny = buddy_data
-                    buddy_name = p_nick if p_nick else p_name
-
-                    # Fetch Image URL dynamically
+                bd = await cursor.fetchone()
+                if bd:
+                    buddy_name = bd[2] if bd[2] else bd[1]
                     async with aiohttp.ClientSession() as session:
-                        url = f"https://pokeapi.co/api/v2/pokemon/{p_id}"
-                        async with session.get(url) as resp:
-                            if resp.status == 200:
-                                d = await resp.json()
+                        async with session.get(
+                            f"https://pokeapi.co/api/v2/pokemon/{bd[0]}"
+                        ) as r:
+                            if r.status == 200:
+                                d = await r.json()
                                 buddy_img = (
                                     d["sprites"]["front_shiny"]
-                                    if is_shiny
+                                    if bd[3]
                                     else d["sprites"]["front_default"]
                                 )
 
@@ -471,51 +566,33 @@ class PokemonGame(commands.Cog):
         embed.add_field(name="💰 Coins", value=f"{coins}", inline=True)
         embed.add_field(name="📦 Pulls", value=f"{pulls}", inline=True)
         embed.add_field(name="❤️ Buddy", value=f"{buddy_name}", inline=True)
-
         if buddy_img:
             embed.set_thumbnail(url=buddy_img)
         else:
             embed.set_thumbnail(
                 url=interaction.user.avatar.url if interaction.user.avatar else None
             )
-
         await interaction.followup.send(embed=embed)
 
-    # --- UPDATED BOX (With Rename Support) ---
     @pokemon_group.command(name="box", description="Manage your Pokémon Storage")
     async def box(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
-
         async with self.bot.db.cursor() as cursor:
-            # FIX: Select nickname too
             await cursor.execute(
-                """
-                SELECT id, pokemon_id, pokemon_name, is_shiny, nickname
-                FROM collection
-                WHERE user_uuid = ?
-                ORDER BY id DESC
-            """,
+                "SELECT id, pokemon_id, pokemon_name, is_shiny, nickname FROM collection WHERE user_uuid = ? ORDER BY id DESC",
                 (user_uuid,),
             )
             rows = await cursor.fetchall()
-
         if not rows:
-            await interaction.followup.send("Your box is empty! Go catch some Pokémon.")
+            await interaction.followup.send("Box empty!")
             return
-
         view = BoxView(rows, interaction.user.name)
         await interaction.followup.send(embed=view.get_embed(), view=view)
 
-    # --- UPDATED TRADE (With Nicknames) ---
     @pokemon_group.command(name="trade", description="Trade Pokemon with a friend")
-    @app_commands.describe(
-        partner="Who to trade with",
-        your_id="ID of YOUR Pokemon",
-        their_id="ID of THEIR Pokemon",
-    )
     async def trade(
         self,
         interaction: discord.Interaction,
@@ -525,67 +602,48 @@ class PokemonGame(commands.Cog):
     ):
         if partner.bot or partner.id == interaction.user.id:
             await interaction.response.send_message(
-                "❌ You cannot trade with bots or yourself!", ephemeral=True
+                "❌ Invalid partner.", ephemeral=True
             )
             return
-
         await interaction.response.defer()
         db = self.bot.db
         author_uuid = await get_or_create_uuid(
             db, interaction.user.id, interaction.user.name
         )
         partner_uuid = await get_or_create_uuid(db, partner.id, partner.name)
-
         async with db.cursor() as cursor:
-            # Fetch Names and Nicknames
             await cursor.execute(
                 "SELECT pokemon_name, is_shiny, nickname FROM collection WHERE id = ? AND user_uuid = ?",
                 (your_id, author_uuid),
             )
-            your_poke = await cursor.fetchone()
-
+            y = await cursor.fetchone()
             await cursor.execute(
                 "SELECT pokemon_name, is_shiny, nickname FROM collection WHERE id = ? AND user_uuid = ?",
                 (their_id, partner_uuid),
             )
-            their_poke = await cursor.fetchone()
-
-        if not your_poke:
-            await interaction.followup.send(f"❌ You don't own ID `{your_id}`!")
-            return
-        if not their_poke:
-            await interaction.followup.send(
-                f"❌ {partner.name} doesn't own ID `{their_id}`!"
-            )
+            t = await cursor.fetchone()
+        if not y or not t:
+            await interaction.followup.send("❌ Invalid ownership.")
             return
 
-        # Format Names (Use Nickname if exists)
-        y_n = your_poke[2] if your_poke[2] else your_poke[0]
-        t_n = their_poke[2] if their_poke[2] else their_poke[0]
-
-        y_display = f"{y_n} {'✨' if your_poke[1] else ''}"
-        t_display = f"{t_n} {'✨' if their_poke[1] else ''}"
-
+        y_n = y[2] if y[2] else y[0]
+        t_n = t[2] if t[2] else t[0]
         embed = discord.Embed(
             title="🤝 Trade Offer",
             description=f"{interaction.user.mention} wants to trade with {partner.mention}!",
             color=discord.Color.gold(),
         )
         embed.add_field(
-            name=f"{interaction.user.name} Offers",
-            value=f"**{y_display}**\n(ID: {your_id})",
+            name=f"{interaction.user.name}",
+            value=f"**{y_n}**\n(ID: {your_id})",
             inline=True,
         )
         embed.add_field(
-            name=f"{partner.name} Offers",
-            value=f"**{t_display}**\n(ID: {their_id})",
-            inline=True,
+            name=f"{partner.name}", value=f"**{t_n}**\n(ID: {their_id})", inline=True
         )
-
         view = TradeView(self.bot, interaction.user, partner, your_id, their_id)
         await interaction.followup.send(content=partner.mention, embed=embed, view=view)
 
-    # --- EXISTING COMMANDS (Shortened for context, but included in full file usually) ---
     @pokemon_group.command(name="balance", description="Check your Coins and Pulls")
     async def balance(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -625,12 +683,7 @@ class PokemonGame(commands.Cog):
                     await interaction.followup.send(f"⏳ Come back <t:{timestamp}:R>.")
                     return
             await cursor.execute(
-                """
-                INSERT INTO game_profile (user_uuid, available_pulls, last_daily, coins)
-                VALUES (?, 5, ?, 0)
-                ON CONFLICT(user_uuid) DO UPDATE SET
-                available_pulls = available_pulls + 5, last_daily = ?
-            """,
+                """INSERT INTO game_profile (user_uuid, available_pulls, last_daily, coins) VALUES (?, 5, ?, 0) ON CONFLICT(user_uuid) DO UPDATE SET available_pulls = available_pulls + 5, last_daily = ?""",
                 (
                     user_uuid,
                     datetime.datetime.now().isoformat(),
@@ -719,12 +772,10 @@ class PokemonGame(commands.Cog):
                 (amount, user_uuid),
             )
         await self.bot.db.commit()
-
         async with aiohttp.ClientSession() as session:
             tasks = [self.fetch_pokemon(session) for _ in range(amount)]
             results = await asyncio.gather(*tasks)
         caught = [p for p in results if p is not None]
-
         async with self.bot.db.cursor() as cursor:
             for p in caught:
                 await cursor.execute(
@@ -732,7 +783,6 @@ class PokemonGame(commands.Cog):
                     (user_uuid, p["id"], p["name"], p["is_shiny"], p["is_legendary"]),
                 )
         await self.bot.db.commit()
-
         if amount == 1:
             p = caught[0]
             name_display = f"✨ {p['name']} ✨" if p["is_shiny"] else p["name"]
@@ -775,15 +825,6 @@ class PokemonGame(commands.Cog):
                 await interaction.followup.send(embed=embed, file=file)
             else:
                 await interaction.followup.send(embed=embed)
-
-    @pokemon_group.command(name="pokedex", description="View your collection summary")
-    async def pokedex(self, interaction: discord.Interaction):
-        # ... (Old Pokedex code can remain same, but usually people prefer Box now) ...
-        # For brevity, let's point them to Box
-        await interaction.response.send_message(
-            "💡 Use `/pokemon box` to see your full collection with Nicknames!",
-            ephemeral=True,
-        )
 
     @pokemon_group.command(name="release", description="Sell Pokémon for 20 Coins each")
     async def release(
@@ -839,7 +880,6 @@ class PokemonGame(commands.Cog):
             f"✅ Gave {amount} pulls to {member.name}.", ephemeral=True
         )
 
-    # --- 🚨 DATABASE REPAIR (UPDATED) 🚨 ---
     @pokemon_group.command(
         name="repair_db", description="ADMIN: Fix missing database columns"
     )
@@ -849,7 +889,6 @@ class PokemonGame(commands.Cog):
         db = self.bot.db
         results = []
         async with db.cursor() as cursor:
-            # 1. Shinies
             try:
                 await cursor.execute(
                     "ALTER TABLE collection ADD COLUMN is_shiny BOOLEAN DEFAULT 0"
@@ -857,7 +896,6 @@ class PokemonGame(commands.Cog):
                 results.append("✅ Added 'is_shiny'")
             except Exception as e:
                 results.append(f"ℹ️ Shiny: {e}")
-            # 2. Legendaries
             try:
                 await cursor.execute(
                     "ALTER TABLE collection ADD COLUMN is_legendary BOOLEAN DEFAULT 0"
@@ -865,7 +903,6 @@ class PokemonGame(commands.Cog):
                 results.append("✅ Added 'is_legendary'")
             except Exception as e:
                 results.append(f"ℹ️ Legendary: {e}")
-            # 3. NEW: NICKNAMES
             try:
                 await cursor.execute(
                     "ALTER TABLE collection ADD COLUMN nickname TEXT DEFAULT NULL"
@@ -873,7 +910,6 @@ class PokemonGame(commands.Cog):
                 results.append("✅ Added 'nickname'")
             except Exception as e:
                 results.append(f"ℹ️ Nickname: {e}")
-            # 4. NEW: BUDDY ID
             try:
                 await cursor.execute(
                     "ALTER TABLE game_profile ADD COLUMN buddy_id INTEGER DEFAULT NULL"
@@ -881,7 +917,6 @@ class PokemonGame(commands.Cog):
                 results.append("✅ Added 'buddy_id'")
             except Exception as e:
                 results.append(f"ℹ️ Buddy: {e}")
-
         await db.commit()
         await interaction.followup.send(
             f"**Database Repair Report:**\n" + "\n".join(results)
