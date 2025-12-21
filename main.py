@@ -16,28 +16,30 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 
 class MyBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        super().__init__(command_prefix="$", intents=intents)
-        self.db_name = "bot_database.db"
+        super().__init__(
+            command_prefix="!", intents=discord.Intents.all(), help_command=None
+        )
+        # Fix: Initialize db variable as None so it doesn't crash on error
+        self.db = None
 
     async def setup_hook(self):
-        # 1. Initialize SQLite (Database)
-        await initialize_database()
-        self.db = await aiosqlite.connect(self.db_name)
+            # 1. Initialize DB Table
+            await initialize_database()
 
-        # 2. Initialize JSON (Settings)
-        load_data()  # <--- LOAD YOUR JSON HERE
+            # 2. Open Persistent Connection
+            # Make sure to import DB_NAME from utils.database at the top of main.py!
+            from utils.database import DB_NAME
+            self.db = await aiosqlite.connect(DB_NAME)
 
         # 3. Load Cogs
-        print("--- Loading Cogs ---")
-        for filename in os.listdir("./cogs"):
-            if filename.endswith(".py"):
-                try:
-                    await self.load_extension(f"cogs.{filename[:-3]}")
-                    print(f"Loaded extension: {filename}")
-                except Exception as e:
-                    print(f"Failed to load {filename}: {e}")
+            print("--- Loading Cogs ---")
+            for filename in os.listdir("./cogs"):
+                if filename.endswith(".py"):
+                    try:
+                        await self.load_extension(f"cogs.{filename[:-3]}")
+                        print(f"Loaded extension: {filename}")
+                    except Exception as e:
+                        print(f"Failed to load {filename}: {e}")
         print("--- Cogs Loaded ---")
 
     async def close(self):

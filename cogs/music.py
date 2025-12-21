@@ -91,7 +91,6 @@ class Music(commands.Cog):
                 after=lambda e: self.play_next(interaction),
             )
         else:
-            # Queue is empty! Start the disconnect timer.
             self.is_playing = False
             self.current_song = None
             asyncio.run_coroutine_threadsafe(

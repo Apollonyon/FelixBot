@@ -1,11 +1,17 @@
+import os
 import uuid
 
 import aiosqlite
 
-DB_NAME = "bot_database.db"
+# Put DB inside a folder
+DB_FOLDER = "data"
+DB_NAME = f"{DB_FOLDER}/bot_database.db"
 
 
 async def initialize_database():
+    # CHANGED: Create the folder automatically
+    os.makedirs(DB_FOLDER, exist_ok=True)
+
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.cursor() as cursor:
             # 1. Users
@@ -16,6 +22,7 @@ async def initialize_database():
                     username TEXT
                 )
             """)
+            # (Keeping your existing migration logic)
             try:
                 await cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
             except aiosqlite.OperationalError:
@@ -52,7 +59,6 @@ async def initialize_database():
                     coins INTEGER DEFAULT 0
                 )
             """)
-            # Migration: Add coins column if it doesn't exist
             try:
                 await cursor.execute(
                     "ALTER TABLE game_profile ADD COLUMN coins INTEGER DEFAULT 0"
@@ -72,7 +78,7 @@ async def initialize_database():
             """)
 
         await db.commit()
-        print("--- Database Tables Checked (Economy Added) ---")
+        print(f"--- Database Initialized at {DB_NAME} ---")
 
 
 async def get_or_create_uuid(discord_id: int, username: str = None):
