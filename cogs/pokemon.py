@@ -7,52 +7,248 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image  # New Library for processing images
+from PIL import Image
 
-# Import database connection
 from utils.database import get_or_create_uuid
 
+# --- CONFIGURATION ---
 
-# --- HELPER: Image Collage Generator ---
-def generate_collage(images_bytes):
+# Complete list of Legendaries, Mythicals, and Ultra Beasts (Gen 1-9)
+LEGENDARY_IDS = [
+    # Gen 1
+    144,
+    145,
+    146,
+    150,
+    151,
+    # Gen 2
+    243,
+    244,
+    245,
+    249,
+    250,
+    251,
+    # Gen 3
+    377,
+    378,
+    379,
+    380,
+    381,
+    382,
+    383,
+    384,
+    385,
+    386,
+    # Gen 4
+    480,
+    481,
+    482,
+    483,
+    484,
+    485,
+    486,
+    487,
+    488,
+    490,
+    491,
+    492,
+    493,
+    # Gen 5
+    494,
+    638,
+    639,
+    640,
+    641,
+    642,
+    643,
+    644,
+    645,
+    646,
+    647,
+    648,
+    649,
+    # Gen 6
+    716,
+    717,
+    718,
+    719,
+    720,
+    721,
+    # Gen 7
+    772,
+    773,
+    785,
+    786,
+    787,
+    788,
+    789,
+    790,
+    791,
+    792,
+    800,
+    801,
+    802,
+    807,
+    793,
+    794,
+    795,
+    796,
+    797,
+    798,
+    799,
+    803,
+    804,
+    805,
+    806,
+    # Gen 8
+    888,
+    889,
+    890,
+    891,
+    892,
+    894,
+    895,
+    896,
+    897,
+    898,
+    # Gen 9
+    1001,
+    1002,
+    1003,
+    1004,
+    1007,
+    1008,
+]
+
+SHINY_CHANCE = 0.05  # 5% Chance
+LEGENDARY_CHANCE = 0.02  # 2% Chance
+
+
+# --- HELPER: Image Collage ---
+def generate_collage(images_data):
     """
-    Takes a list of image bytes, creates a 5-column grid.
-    Sprites are usually 96x96. We'll make 100x100 slots.
+    images_data is a list of tuples: (bytes, is_shiny)
     """
-    if not images_bytes:
+    if not images_data:
         return None
 
-    # Settings
     img_width, img_height = 96, 96
-    columns = 5
-    rows = (len(images_bytes) + columns - 1) // columns  # Calculate needed rows
+    columns = 3  # <--- Set to 3 for a nicer grid shape
+    rows = (len(images_data) + columns - 1) // columns
 
-    # Create blank canvas (Transparent background)
     canvas_width = columns * img_width
     canvas_height = rows * img_height
     canvas = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
 
-    for i, img_data in enumerate(images_bytes):
+    for i, (img_bytes, is_shiny) in enumerate(images_data):
         try:
-            # Open the image from bytes
-            with Image.open(BytesIO(img_data)) as img:
-                # Calculate position
+            with Image.open(BytesIO(img_bytes)) as img:
+                img = img.convert("RGBA")
+
+                # Logic: Paste into grid
                 x = (i % columns) * img_width
                 y = (i // columns) * img_height
 
-                # Paste onto canvas
-                canvas.paste(img, (x, y))
+                canvas.paste(img, (x, y), img)
         except Exception as e:
             print(f"Error processing image {i}: {e}")
 
-    # Save to bytes to send to Discord
     output_buffer = BytesIO()
     canvas.save(output_buffer, format="PNG")
-    output_buffer.seek(0)  # Reset pointer to start
+    output_buffer.seek(0)
     return output_buffer
 
 
-# --- VIEW (Buttons for Pokedex) ---
+# --- VIEW: Trade Confirmation ---
+class TradeView(discord.ui.View):
+    def __init__(self, bot, author, partner, author_poke_id, partner_poke_id):
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.author = author
+        self.partner = partner
+        self.author_poke_id = author_poke_id
+        self.partner_poke_id = partner_poke_id
+        self.value = None
+
+    @discord.ui.button(label="✅ Accept Trade", style=discord.ButtonStyle.green)
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        # Only the PARTNER (the person receiving the offer) can click this
+        if interaction.user.id != self.partner.id:
+            await interaction.response.send_message(
+                "❌ This trade request isn't for you!", ephemeral=True
+            )
+            return
+
+        db = self.bot.db
+
+        # 1. Get UUIDs
+        author_uuid = await get_or_create_uuid(db, self.author.id, self.author.name)
+        partner_uuid = await get_or_create_uuid(db, self.partner.id, self.partner.name)
+
+        async with db.cursor() as cursor:
+            # 2. Verify Ownership one last time (prevent scams/glitches)
+            await cursor.execute(
+                "SELECT user_uuid FROM collection WHERE id = ?", (self.author_poke_id,)
+            )
+            check_a = await cursor.fetchone()
+            await cursor.execute(
+                "SELECT user_uuid FROM collection WHERE id = ?", (self.partner_poke_id,)
+            )
+            check_b = await cursor.fetchone()
+
+            if not check_a or check_a[0] != author_uuid:
+                await interaction.response.send_message(
+                    "❌ Trade Failed: Original owner no longer has the Pokemon!",
+                    ephemeral=True,
+                )
+                return
+            if not check_b or check_b[0] != partner_uuid:
+                await interaction.response.send_message(
+                    "❌ Trade Failed: Partner no longer has the Pokemon!",
+                    ephemeral=True,
+                )
+                return
+
+            # 3. EXECUTE SWAP
+            # Update Pokemon A -> User B
+            await cursor.execute(
+                "UPDATE collection SET user_uuid = ? WHERE id = ?",
+                (partner_uuid, self.author_poke_id),
+            )
+            # Update Pokemon B -> User A
+            await cursor.execute(
+                "UPDATE collection SET user_uuid = ? WHERE id = ?",
+                (author_uuid, self.partner_poke_id),
+            )
+
+        await db.commit()
+
+        self.value = True
+        self.stop()  # Stop listening
+        await interaction.response.edit_message(
+            content=f"🤝 **Trade Complete!**\n{self.author.mention} ↔ {self.partner.mention}\nCheck your boxes!",
+            view=None,
+            embed=None,
+        )
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if (
+            interaction.user.id != self.partner.id
+            and interaction.user.id != self.author.id
+        ):
+            return
+
+        self.value = False
+        self.stop()
+        await interaction.response.edit_message(
+            content="❌ Trade Cancelled.", view=None, embed=None
+        )
+
+
+# --- VIEW: Pokedex Buttons ---
 class PokedexView(discord.ui.View):
     def __init__(self, pokemon_list, user_name):
         super().__init__(timeout=60)
@@ -61,14 +257,15 @@ class PokedexView(discord.ui.View):
         self.index = 0
 
     def get_embed(self):
-        poke_id, poke_name, count = self.pokemon_list[self.index]
+        poke_id, poke_name, count, shinies = self.pokemon_list[self.index]
         image_url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{poke_id}.png"
 
         embed = discord.Embed(
             title=f"📖 Pokedex: {self.user_name}", color=discord.Color.red()
         )
+        shiny_text = f" (✨ {shinies})" if shinies > 0 else ""
         embed.description = f"**#{poke_id} {poke_name}**"
-        embed.add_field(name="Times Caught", value=str(count), inline=True)
+        embed.add_field(name="Times Caught", value=f"{count}{shiny_text}", inline=True)
         embed.set_image(url=image_url)
         embed.set_footer(text=f"Page {self.index + 1} of {len(self.pokemon_list)}")
         return embed
@@ -98,6 +295,8 @@ class PokedexView(discord.ui.View):
 class PokemonGame(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Pre-calculate safe non-legendary list
+        self.NON_LEGENDARY_IDS = list(set(range(1, 1026)) - set(LEGENDARY_IDS))
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -107,32 +306,45 @@ class PokemonGame(commands.Cog):
         name="pokemon", description="Gacha Game Commands"
     )
 
-    async def fetch_random_pokemon(self, session=None):
-        poke_id = random.randint(1, 1025)
-        url = f"https://pokeapi.co/api/v2/pokemon/{poke_id}"
+    # --- CORE LOGIC: Fetch Pokemon ---
+    async def fetch_pokemon(self, session):
+        # 1. Roll for Rarity
+        is_legendary = random.random() < LEGENDARY_CHANCE
+        is_shiny = random.random() < SHINY_CHANCE
 
-        async def fetch(s):
-            async with s.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return {
-                        "id": data["id"],
-                        "name": data["name"].capitalize(),
-                        "image": data["sprites"]["front_default"],
-                    }
-                return None
-
-        if session:
-            return await fetch(session)
+        # 2. Pick ID
+        if is_legendary:
+            poke_id = random.choice(LEGENDARY_IDS)
         else:
-            async with aiohttp.ClientSession() as temp_session:
-                return await fetch(temp_session)
+            poke_id = random.choice(self.NON_LEGENDARY_IDS)
+
+        # 3. Fetch Data
+        url = f"https://pokeapi.co/api/v2/pokemon/{poke_id}"
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+
+                sprite_url = (
+                    data["sprites"]["front_shiny"]
+                    if is_shiny
+                    else data["sprites"]["front_default"]
+                )
+                if not sprite_url:
+                    sprite_url = data["sprites"]["front_default"]
+
+                return {
+                    "id": data["id"],
+                    "name": data["name"].capitalize(),
+                    "image_url": sprite_url,
+                    "is_shiny": is_shiny,
+                    "is_legendary": is_legendary,
+                }
+            return None
 
     # --- ECONOMY COMMANDS ---
     @pokemon_group.command(name="balance", description="Check your Coins and Pulls")
     async def balance(self, interaction: discord.Interaction):
         await interaction.response.defer()
-
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
@@ -151,6 +363,45 @@ class PokemonGame(commands.Cog):
         embed.add_field(name="Coins", value=f"🪙 **{coins}**", inline=True)
         embed.add_field(name="Pulls", value=f"📦 **{pulls}**", inline=True)
         await interaction.followup.send(embed=embed)
+
+    @pokemon_group.command(name="daily", description="Get 5 free pulls daily!")
+    async def daily(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
+
+        async with self.bot.db.cursor() as cursor:
+            await cursor.execute(
+                "SELECT last_daily FROM game_profile WHERE user_uuid = ?", (user_uuid,)
+            )
+            row = await cursor.fetchone()
+
+            if row and row[0]:
+                last_daily = datetime.datetime.fromisoformat(row[0])
+                if (datetime.datetime.now() - last_daily).total_seconds() < 86400:
+                    next_daily = last_daily + datetime.timedelta(days=1)
+                    timestamp = int(next_daily.timestamp())
+                    await interaction.followup.send(f"⏳ Come back <t:{timestamp}:R>.")
+                    return
+
+            await cursor.execute(
+                """
+                INSERT INTO game_profile (user_uuid, available_pulls, last_daily, coins)
+                VALUES (?, 5, ?, 0)
+                ON CONFLICT(user_uuid) DO UPDATE SET
+                available_pulls = available_pulls + 5,
+                last_daily = ?
+            """,
+                (
+                    user_uuid,
+                    datetime.datetime.now().isoformat(),
+                    datetime.datetime.now().isoformat(),
+                ),
+            )
+
+        await self.bot.db.commit()
+        await interaction.followup.send(f"📦 **Supply Drop!** +5 Poké Balls received.")
 
     @pokemon_group.command(name="shop", description="Buy more pulls")
     async def shop(self, interaction: discord.Interaction):
@@ -210,54 +461,14 @@ class PokemonGame(commands.Cog):
             f"✅ Purchase successful! Spent **{cost} Coins** for **{amount} Pulls**."
         )
 
-    # --- STANDARD GAME COMMANDS ---
-
-    @pokemon_group.command(name="daily", description="Get 5 free pulls daily!")
-    async def daily(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        user_uuid = await get_or_create_uuid(
-            self.bot.db, interaction.user.id, interaction.user.name
-        )
-
-        async with self.bot.db.cursor() as cursor:
-            await cursor.execute(
-                "SELECT last_daily FROM game_profile WHERE user_uuid = ?", (user_uuid,)
-            )
-            row = await cursor.fetchone()
-
-            if row and row[0]:
-                last_daily = datetime.datetime.fromisoformat(row[0])
-                if (datetime.datetime.now() - last_daily).total_seconds() < 86400:
-                    next_daily = last_daily + datetime.timedelta(days=1)
-                    timestamp = int(next_daily.timestamp())
-                    await interaction.followup.send(f"⏳ Come back <t:{timestamp}:R>.")
-                    return
-
-            await cursor.execute(
-                """
-                INSERT INTO game_profile (user_uuid, available_pulls, last_daily, coins)
-                VALUES (?, 5, ?, 0)
-                ON CONFLICT(user_uuid) DO UPDATE SET
-                available_pulls = available_pulls + 5,
-                last_daily = ?
-            """,
-                (
-                    user_uuid,
-                    datetime.datetime.now().isoformat(),
-                    datetime.datetime.now().isoformat(),
-                ),
-            )
-
-        await self.bot.db.commit()
-        await interaction.followup.send(f"📦 **Supply Drop!** +5 Poké Balls received.")
-
+    # --- MAIN GAME: Pull ---
     @pokemon_group.command(name="pull", description="Use Poké Balls")
     @app_commands.describe(amount="How many to pull? (Optional, Default: 1, Max: 10)")
     async def pull(self, interaction: discord.Interaction, amount: int = 1):
         await interaction.response.defer()
 
         if amount > 10:
-            await interaction.followup.send("❌ You can only pull 10 at a time!")
+            await interaction.followup.send("❌ Max 10 pulls at a time!")
             return
         if amount < 1:
             await interaction.followup.send("❌ Amount must be at least 1.")
@@ -267,6 +478,7 @@ class PokemonGame(commands.Cog):
             self.bot.db, interaction.user.id, interaction.user.name
         )
 
+        # 1. Check & Deduct Pulls
         async with self.bot.db.cursor() as cursor:
             await cursor.execute(
                 "SELECT available_pulls FROM game_profile WHERE user_uuid = ?",
@@ -277,7 +489,7 @@ class PokemonGame(commands.Cog):
 
             if pulls < amount:
                 await interaction.followup.send(
-                    f"❌ Not enough Poké Balls! You have **{pulls}**, but tried to pull **{amount}**."
+                    f"❌ Not enough pulls! You have {pulls}."
                 )
                 return
 
@@ -285,120 +497,221 @@ class PokemonGame(commands.Cog):
                 "UPDATE game_profile SET available_pulls = available_pulls - ? WHERE user_uuid = ?",
                 (amount, user_uuid),
             )
-
         await self.bot.db.commit()
 
-        # Bulk Fetch
+        # 2. Fetch Pokemon
         async with aiohttp.ClientSession() as session:
-            tasks = [self.fetch_random_pokemon(session) for _ in range(amount)]
+            tasks = [self.fetch_pokemon(session) for _ in range(amount)]
             results = await asyncio.gather(*tasks)
 
-        caught_pokemon = [p for p in results if p is not None]
+        caught = [p for p in results if p is not None]
 
-        if not caught_pokemon:
-            await interaction.followup.send(
-                "❌ Failed to catch any Pokémon (API Error)."
-            )
-            return
-
-        # Save to DB
+        # 3. Save to Database (With Shiny Flag)
         async with self.bot.db.cursor() as cursor:
-            for p in caught_pokemon:
+            for p in caught:
                 await cursor.execute(
-                    "INSERT INTO collection (user_uuid, pokemon_id, pokemon_name) VALUES (?, ?, ?)",
-                    (user_uuid, p["id"], p["name"]),
+                    "INSERT INTO collection (user_uuid, pokemon_id, pokemon_name, is_shiny) VALUES (?, ?, ?, ?)",
+                    (user_uuid, p["id"], p["name"], p["is_shiny"]),
                 )
         await self.bot.db.commit()
 
-        # --- DISPLAY LOGIC ---
+        # 4. Display Results
         if amount == 1:
-            p = caught_pokemon[0]
-            embed = discord.Embed(
-                title=f"You caught a {p['name']}!",
-                description=f"Balls left: {pulls - 1}",
-                color=discord.Color.gold(),
+            p = caught[0]
+            name_display = f"✨ {p['name']} ✨" if p["is_shiny"] else p["name"]
+            color = (
+                discord.Color.gold()
+                if p["is_legendary"]
+                else (
+                    discord.Color.purple() if p["is_shiny"] else discord.Color.green()
+                )
             )
-            embed.set_image(url=p["image"])
-            embed.set_footer(text=f"ID: #{p['id']}")
+
+            embed = discord.Embed(title=f"You caught {name_display}!", color=color)
+            embed.set_image(url=p["image_url"])
+            if p["is_legendary"]:
+                embed.set_footer(text="🔥 LEGENDARY PULL!")
+            if p["is_shiny"]:
+                embed.set_footer(text="✨ SHINY PULL!")
+
             await interaction.followup.send(embed=embed)
         else:
-            # MULTIPLE PULLS: Generate Collage
+            # Generate Text List
             desc = ""
-            for p in caught_pokemon:
-                desc += f"• **#{p['id']} {p['name']}**\n"
+            for p in caught:
+                icon = "✨" if p["is_shiny"] else ""
+                bold = "**" if p["is_legendary"] else ""
+                desc += f"• {bold}{p['name']} {icon}{bold}\n"
 
-            # Download images for the collage
-            image_bytes_list = []
+            # Generate Image Collage
+            image_data_list = []
             async with aiohttp.ClientSession() as session:
-                for p in caught_pokemon:
-                    if p["image"]:
-                        async with session.get(p["image"]) as resp:
+                for p in caught:
+                    if p["image_url"]:
+                        async with session.get(p["image_url"]) as resp:
                             if resp.status == 200:
-                                image_bytes_list.append(await resp.read())
+                                image_data_list.append(
+                                    (await resp.read(), p["is_shiny"])
+                                )
 
-            # Create the image file
-            collage_buffer = await asyncio.to_thread(generate_collage, image_bytes_list)
-
-            file = None
-            if collage_buffer:
-                file = discord.File(collage_buffer, filename="pulls.png")
+            collage = await asyncio.to_thread(generate_collage, image_data_list)
+            file = discord.File(collage, filename="pulls.png") if collage else None
 
             embed = discord.Embed(
-                title=f"🔥 You caught {len(caught_pokemon)} Pokémon!",
-                description=desc,
-                color=discord.Color.gold(),
+                title=f"🔥 Pull Results", description=desc, color=discord.Color.gold()
             )
-            embed.set_footer(text=f"Balls left: {pulls - amount}")
-
             if file:
                 embed.set_image(url="attachment://pulls.png")
                 await interaction.followup.send(embed=embed, file=file)
             else:
                 await interaction.followup.send(embed=embed)
 
-    @pokemon_group.command(name="pokedex", description="View your collection")
+    # --- POKEDEX & BOX ---
+    @pokemon_group.command(name="pokedex", description="View your collection summary")
     async def pokedex(self, interaction: discord.Interaction):
         await interaction.response.defer()
-
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
 
         async with self.bot.db.cursor() as cursor:
-            await cursor.execute(
-                "SELECT COUNT(DISTINCT pokemon_id) FROM collection WHERE user_uuid = ?",
-                (user_uuid,),
-            )
-            unique_count = await cursor.fetchone()
-            unique = unique_count[0] if unique_count else 0
-
-            await cursor.execute(
-                """
-                SELECT pokemon_id, pokemon_name, COUNT(*) as count
+            await cursor.execute("""
+                SELECT pokemon_id, pokemon_name, count(*) as count, sum(is_shiny) as shinies
                 FROM collection
                 WHERE user_uuid = ?
                 GROUP BY pokemon_id
                 ORDER BY pokemon_id ASC
-            """,
-                (user_uuid,),
-            )
+            """)
             rows = await cursor.fetchall()
 
         if not rows:
-            await interaction.followup.send("❌ Pokedex empty.")
+            await interaction.followup.send("Empty collection!")
             return
 
         view = PokedexView(rows, interaction.user.name)
-        embed = view.get_embed()
-        embed.description = (
-            f"**Progress: {unique} / 1025 Unique Species**\n" + embed.description
+        await interaction.followup.send(embed=view.get_embed(), view=view)
+
+    @pokemon_group.command(
+        name="box", description="List your Pokemon with their unique IDs"
+    )
+    async def box(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
         )
-        await interaction.followup.send(embed=embed, view=view)
+
+        async with self.bot.db.cursor() as cursor:
+            # Fetch last 20 pokemon caught with their Unique ID
+            await cursor.execute("""
+                SELECT id, pokemon_id, pokemon_name, is_shiny, caught_at
+                FROM collection
+                WHERE user_uuid = ?
+                ORDER BY id DESC LIMIT 20
+            """)
+            rows = await cursor.fetchall()
+
+        if not rows:
+            await interaction.followup.send("Your box is empty! Go catch some Pokemon.")
+            return
+
+        desc = "Use these **IDs** to trade!\n\n"
+        for row in rows:
+            unique_id, p_id, name, shiny, date = row
+            icon = "✨" if shiny else ""
+            # Check Legendary List
+            is_legendary = p_id in LEGENDARY_IDS
+            bold = "**" if is_legendary else ""
+
+            desc += f"`ID: {unique_id}` — {bold}{name}{bold} {icon}\n"
+
+        embed = discord.Embed(
+            title=f"📦 {interaction.user.name}'s Storage (Last 20)",
+            description=desc,
+            color=discord.Color.blue(),
+        )
+        await interaction.followup.send(embed=embed)
+
+    # --- TRADING SYSTEM ---
+    @pokemon_group.command(name="trade", description="Trade Pokemon with a friend")
+    @app_commands.describe(
+        partner="Who to trade with",
+        your_id="ID of YOUR Pokemon",
+        their_id="ID of THEIR Pokemon",
+    )
+    async def trade(
+        self,
+        interaction: discord.Interaction,
+        partner: discord.Member,
+        your_id: int,
+        their_id: int,
+    ):
+        if partner.bot or partner.id == interaction.user.id:
+            await interaction.response.send_message(
+                "❌ You cannot trade with bots or yourself!", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+        db = self.bot.db
+
+        # 1. Verify Ownership
+        author_uuid = await get_or_create_uuid(
+            db, interaction.user.id, interaction.user.name
+        )
+        partner_uuid = await get_or_create_uuid(db, partner.id, partner.name)
+
+        async with db.cursor() as cursor:
+            # Check Your Pokemon
+            await cursor.execute(
+                "SELECT pokemon_name, is_shiny FROM collection WHERE id = ? AND user_uuid = ?",
+                (your_id, author_uuid),
+            )
+            your_poke = await cursor.fetchone()
+
+            # Check Their Pokemon
+            await cursor.execute(
+                "SELECT pokemon_name, is_shiny FROM collection WHERE id = ? AND user_uuid = ?",
+                (their_id, partner_uuid),
+            )
+            their_poke = await cursor.fetchone()
+
+        # 2. Validation Checks
+        if not your_poke:
+            await interaction.followup.send(
+                f"❌ You don't own a Pokémon with ID `{your_id}`!"
+            )
+            return
+        if not their_poke:
+            await interaction.followup.send(
+                f"❌ {partner.name} doesn't own a Pokémon with ID `{their_id}`!"
+            )
+            return
+
+        # 3. Construct the Offer
+        y_name = f"{your_poke[0]} {'✨' if your_poke[1] else ''}"
+        t_name = f"{their_poke[0]} {'✨' if their_poke[1] else ''}"
+
+        embed = discord.Embed(
+            title="🤝 Trade Offer",
+            description=f"{interaction.user.mention} wants to trade with {partner.mention}!",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name=f"{interaction.user.name} Offers",
+            value=f"**{y_name}**\n(ID: {your_id})",
+            inline=True,
+        )
+        embed.add_field(
+            name=f"{partner.name} Offers",
+            value=f"**{t_name}**\n(ID: {their_id})",
+            inline=True,
+        )
+        embed.set_footer(text="Waiting for partner to accept...")
+
+        view = TradeView(self.bot, interaction.user, partner, your_id, their_id)
+        await interaction.followup.send(content=partner.mention, embed=embed, view=view)
 
     @pokemon_group.command(name="release", description="Sell Pokémon for 20 Coins each")
-    @app_commands.describe(
-        name="Name of the Pokémon", amount="How many to release? (Optional, Default: 1)"
-    )
     async def release(
         self, interaction: discord.Interaction, name: str, amount: int = 1
     ):
@@ -413,7 +726,7 @@ class PokemonGame(commands.Cog):
         pokemon_name = name.capitalize()
 
         async with self.bot.db.cursor() as cursor:
-            # 1. Check ownership count
+            # Check ownership
             await cursor.execute(
                 "SELECT count(*) FROM collection WHERE user_uuid = ? AND pokemon_name = ?",
                 (user_uuid, pokemon_name),
@@ -427,7 +740,7 @@ class PokemonGame(commands.Cog):
                 )
                 return
 
-            # 2. Delete N specific rows
+            # Delete
             await cursor.execute(
                 """
                 DELETE FROM collection
@@ -440,7 +753,7 @@ class PokemonGame(commands.Cog):
                 (user_uuid, pokemon_name, amount),
             )
 
-            # 3. Add Coins
+            # Add Coins
             sell_price = 20 * amount
             await cursor.execute(
                 "UPDATE game_profile SET coins = coins + ? WHERE user_uuid = ?",
@@ -451,44 +764,6 @@ class PokemonGame(commands.Cog):
         await interaction.followup.send(
             f"👋 You released **{amount}x {pokemon_name}**.\n💰 You received **{sell_price} Coins**."
         )
-
-    @pokemon_group.command(name="potd", description="See the global Pokémon of the Day")
-    async def potd(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        today = datetime.date.today().toordinal()
-        rng = random.Random(today)
-        potd_id = rng.randint(1, 1025)
-
-        url = f"https://pokeapi.co/api/v2/pokemon/{potd_id}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-
-                    description = "A mysterious Pokémon."
-                    species_url = data["species"]["url"]
-                    async with session.get(species_url) as species_res:
-                        if species_res.status == 200:
-                            s_data = await species_res.json()
-                            for entry in s_data["flavor_text_entries"]:
-                                if entry["language"]["name"] == "en":
-                                    description = (
-                                        entry["flavor_text"]
-                                        .replace("\n", " ")
-                                        .replace("\f", " ")
-                                    )
-                                    break
-
-                    embed = discord.Embed(
-                        title=f"📅 Pokémon of the Day: {data['name'].capitalize()}",
-                        color=discord.Color.purple(),
-                    )
-                    embed.description = f"**Fun Fact:**\n*{description}*"
-                    embed.set_image(url=data["sprites"]["front_default"])
-                    embed.set_footer(text=f"ID: #{data['id']}")
-                    await interaction.followup.send(embed=embed)
-                else:
-                    await interaction.followup.send("Failed to fetch.")
 
     @pokemon_group.command(name="givepulls", description="Admin: Give pulls")
     @app_commands.checks.has_permissions(administrator=True)
