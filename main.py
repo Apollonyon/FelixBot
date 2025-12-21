@@ -45,6 +45,7 @@ class MyBot(commands.Bot):
             "cogs.music",
             "cogs.admin",
             "cogs.help",
+            "cogs.combat",
         ]
 
         for extension in initial_extensions:
