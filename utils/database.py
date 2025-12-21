@@ -3,16 +3,21 @@ import uuid
 
 import aiosqlite
 
-# Put DB inside a folder
 DB_FOLDER = "data"
 DB_NAME = f"{DB_FOLDER}/bot_database.db"
 
 
 async def initialize_database():
-    # CHANGED: Create the folder automatically
     os.makedirs(DB_FOLDER, exist_ok=True)
 
     async with aiosqlite.connect(DB_NAME) as db:
+        # --- FIX 1: Enable Write-Ahead Logging (WAL) ---
+        # This allows readers and writers to work at the same time
+        await db.execute("PRAGMA journal_mode=WAL;")
+
+        # Optimize synchronization for speed/safety balance
+        await db.execute("PRAGMA synchronous=NORMAL;")
+
         async with db.cursor() as cursor:
             # 1. Users
             await cursor.execute("""
@@ -22,7 +27,7 @@ async def initialize_database():
                     username TEXT
                 )
             """)
-            # (Keeping your existing migration logic)
+            # Migration check
             try:
                 await cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
             except aiosqlite.OperationalError:
@@ -78,11 +83,13 @@ async def initialize_database():
             """)
 
         await db.commit()
-        print(f"--- Database Initialized at {DB_NAME} ---")
+        print(f"--- Database Initialized (WAL Mode) at {DB_NAME} ---")
 
 
 async def get_or_create_uuid(discord_id: int, username: str = None):
-    async with aiosqlite.connect(DB_NAME) as db:
+    # --- FIX 2: Increase Timeout to 30 seconds ---
+    # If the DB is busy, the bot will wait 30s before crashing.
+    async with aiosqlite.connect(DB_NAME, timeout=30.0) as db:
         async with db.cursor() as cursor:
             await cursor.execute(
                 "SELECT user_uuid FROM users WHERE discord_id = ?", (discord_id,)
@@ -92,6 +99,7 @@ async def get_or_create_uuid(discord_id: int, username: str = None):
             if result:
                 uuid_str = result[0]
                 if username:
+                    # Update username if it changed
                     await cursor.execute(
                         "UPDATE users SET username = ? WHERE discord_id = ?",
                         (username, discord_id),
