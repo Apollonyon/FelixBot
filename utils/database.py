@@ -11,7 +11,6 @@ async def initialize_database():
     os.makedirs(DB_FOLDER, exist_ok=True)
 
     async with aiosqlite.connect(DB_NAME) as db:
-        # --- FIX 1: Enable Write-Ahead Logging (WAL) ---
         # This allows readers and writers to work at the same time
         await db.execute("PRAGMA journal_mode=WAL;")
 
@@ -87,7 +86,6 @@ async def initialize_database():
 
 
 async def get_or_create_uuid(discord_id: int, username: str = None):
-    # --- FIX 2: Increase Timeout to 30 seconds ---
     # If the DB is busy, the bot will wait 30s before crashing.
     async with aiosqlite.connect(DB_NAME, timeout=30.0) as db:
         async with db.cursor() as cursor:
