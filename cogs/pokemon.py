@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+# IMPORTANT: We now pass the DB connection to this function
 from utils.database import get_or_create_uuid
 
 
@@ -91,7 +92,11 @@ class PokemonGame(commands.Cog):
     @pokemon_group.command(name="balance", description="Check your Coins and Pulls")
     async def balance(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        user_uuid = await get_or_create_uuid(interaction.user.id)
+
+        # FIX: Pass self.bot.db
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
 
         async with self.bot.db.cursor() as cursor:
             await cursor.execute(
@@ -120,7 +125,10 @@ class PokemonGame(commands.Cog):
             await interaction.followup.send("❌ Amount must be at least 1.")
             return
 
-        user_uuid = await get_or_create_uuid(interaction.user.id)
+        # FIX: Pass self.bot.db
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
         pokemon_name = name.capitalize()
 
         async with self.bot.db.cursor() as cursor:
@@ -158,6 +166,7 @@ class PokemonGame(commands.Cog):
                 (sell_price, user_uuid),
             )
 
+        # FIX: Commit the shared DB
         await self.bot.db.commit()
         await interaction.followup.send(
             f"👋 You released **{amount}x {pokemon_name}**.\n💰 You received **{sell_price} Coins**."
@@ -191,7 +200,11 @@ class PokemonGame(commands.Cog):
         self, interaction: discord.Interaction, item: app_commands.Choice[str]
     ):
         await interaction.response.defer()
-        user_uuid = await get_or_create_uuid(interaction.user.id)
+
+        # FIX: Pass self.bot.db
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
 
         cost = 100 if item.value == "pull" else 900
         amount = 1 if item.value == "pull" else 10
@@ -224,7 +237,11 @@ class PokemonGame(commands.Cog):
     @pokemon_group.command(name="daily", description="Get 5 free pulls daily!")
     async def daily(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        user_uuid = await get_or_create_uuid(interaction.user.id)
+
+        # FIX: Pass self.bot.db
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
 
         async with self.bot.db.cursor() as cursor:
             await cursor.execute(
@@ -270,7 +287,10 @@ class PokemonGame(commands.Cog):
             await interaction.followup.send("❌ Amount must be at least 1.")
             return
 
-        user_uuid = await get_or_create_uuid(interaction.user.id)
+        # FIX: Pass self.bot.db
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
 
         async with self.bot.db.cursor() as cursor:
             await cursor.execute(
@@ -291,9 +311,10 @@ class PokemonGame(commands.Cog):
                 (amount, user_uuid),
             )
 
+        # We commit the deduction immediately so they can't spam
         await self.bot.db.commit()
 
-        # Bulk Fetch
+        # Bulk Fetch (No DB here)
         async with aiohttp.ClientSession() as session:
             tasks = [self.fetch_random_pokemon(session) for _ in range(amount)]
             results = await asyncio.gather(*tasks)
@@ -306,17 +327,18 @@ class PokemonGame(commands.Cog):
             )
             return
 
+        # Save Pokemon to DB
         async with self.bot.db.cursor() as cursor:
             for p in caught_pokemon:
                 await cursor.execute(
                     "INSERT INTO collection (user_uuid, pokemon_id, pokemon_name) VALUES (?, ?, ?)",
                     (user_uuid, p["id"], p["name"]),
                 )
+
         await self.bot.db.commit()
 
         # Display Logic
         if amount == 1:
-            # Single pull gets a nice big card
             p = caught_pokemon[0]
             embed = discord.Embed(
                 title=f"You caught a {p['name']}!",
@@ -327,7 +349,6 @@ class PokemonGame(commands.Cog):
             embed.set_footer(text=f"ID: #{p['id']}")
             await interaction.followup.send(embed=embed)
         else:
-            # Bulk pull gets a list summary
             desc = ""
             for p in caught_pokemon:
                 desc += f"• **#{p['id']} {p['name']}**\n"
@@ -344,7 +365,11 @@ class PokemonGame(commands.Cog):
     @pokemon_group.command(name="pokedex", description="View your collection")
     async def pokedex(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        user_uuid = await get_or_create_uuid(interaction.user.id)
+
+        # FIX: Pass self.bot.db
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
 
         async with self.bot.db.cursor() as cursor:
             await cursor.execute(
@@ -420,7 +445,9 @@ class PokemonGame(commands.Cog):
     async def give_pulls(
         self, interaction: discord.Interaction, member: discord.Member, amount: int
     ):
-        user_uuid = await get_or_create_uuid(member.id)
+        # FIX: Pass self.bot.db
+        user_uuid = await get_or_create_uuid(self.bot.db, member.id, member.name)
+
         async with self.bot.db.cursor() as cursor:
             await cursor.execute(
                 """

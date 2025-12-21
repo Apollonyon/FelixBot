@@ -10,6 +10,7 @@ from utils.database import get_or_create_uuid
 class Leveling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Anti-Spam: 1 XP gain every 60 seconds per user
         self._cd = commands.CooldownMapping.from_cooldown(
             1, 60.0, commands.BucketType.user
         )
@@ -34,17 +35,23 @@ class Leveling(commands.Cog):
     async def on_message(self, message):
         if message.author.bot:
             return
+
+        # Check cooldown (prevents spamming for XP)
         if self.get_ratelimit(message):
             return
 
-        user_uuid = await get_or_create_uuid(message.author.id, message.author.name)
+        # USE THE SHARED BOT CONNECTION
+        db = self.bot.db
 
-        await self.add_xp(user_uuid, message.author, message.guild, message.channel)
+        # Pass 'db' into the function
+        user_uuid = await get_or_create_uuid(db, message.author.id, message.author.name)
 
-    async def add_xp(self, user_uuid, user, guild, channel):
+        await self.add_xp(db, user_uuid, message.author, message.guild, message.channel)
+
+    async def add_xp(self, db, user_uuid, user, guild, channel):
         xp_to_add = random.randint(15, 35)
 
-        async with self.bot.db.cursor() as cursor:
+        async with db.cursor() as cursor:
             await cursor.execute(
                 "SELECT xp, level FROM levels WHERE user_uuid = ?", (user_uuid,)
             )
@@ -64,19 +71,15 @@ class Leveling(commands.Cog):
                     new_level = current_level + 1
                     remaining_xp = new_xp - xp_threshold
 
-                    # Reward: +1 Pull
+                    # Reward: +1 Pull for leveling up
                     await cursor.execute(
-                        "INSERT OR IGNORE INTO game_profile (user_uuid) VALUES (?)",
-                        (user_uuid,),
-                    )
-                    await cursor.execute(
-                        "UPDATE game_profile SET available_pulls = available_pulls + 1 WHERE user_uuid = ?",
+                        "INSERT INTO game_profile (user_uuid, available_pulls, coins) VALUES (?, 1, 0) ON CONFLICT(user_uuid) DO UPDATE SET available_pulls = available_pulls + 1",
                         (user_uuid,),
                     )
 
-                    # We mention the user so they see it
+                    # Send Level Up Message
                     await channel.send(
-                        f"🎉 {user.mention} has reached **Level {new_level}**! \n🎁 **Bonus:** +1 Poké Ball added."
+                        f"🎉 {user.mention} has reached **Level {new_level}**! \n🎁 **Bonus:** +1 Pull added."
                     )
 
                     await cursor.execute(
@@ -88,7 +91,9 @@ class Leveling(commands.Cog):
                         "UPDATE levels SET xp = ? WHERE user_uuid = ?",
                         (new_xp, user_uuid),
                     )
-                    await self.bot.db.commit()
+
+        # IMPORTANT: Commit changes using the shared connection
+        await db.commit()
 
     # --- COMMANDS ---
 
@@ -97,9 +102,11 @@ class Leveling(commands.Cog):
         self, interaction: discord.Interaction, member: discord.Member = None
     ):
         target = member or interaction.user
-        target_uuid = await get_or_create_uuid(target.id)
+        db = self.bot.db
 
-        async with self.bot.db.cursor() as cursor:
+        target_uuid = await get_or_create_uuid(db, target.id, target.name)
+
+        async with db.cursor() as cursor:
             await cursor.execute(
                 "SELECT xp, level FROM levels WHERE user_uuid = ?", (target_uuid,)
             )
@@ -113,8 +120,9 @@ class Leveling(commands.Cog):
 
         current_xp, level = result
         xp_needed_total = self.calculate_xp_for_next_level(level)
-        percentage = min(1.0, max(0.0, current_xp / xp_needed_total))
 
+        # Calculate progress bar
+        percentage = min(1.0, max(0.0, current_xp / xp_needed_total))
         blocks = int(percentage * 10)
         bar = "🟦" * blocks + "⬜" * (10 - blocks)
 
@@ -136,7 +144,9 @@ class Leveling(commands.Cog):
     async def leaderboard(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        async with self.bot.db.cursor() as cursor:
+        db = self.bot.db
+
+        async with db.cursor() as cursor:
             await cursor.execute("""
                     SELECT users.username, levels.level, levels.xp
                     FROM levels
@@ -154,7 +164,6 @@ class Leveling(commands.Cog):
 
         for index, row in enumerate(rows, start=1):
             username, level, xp = row
-
             name = username if username else "Unknown User"
 
             medal = (
