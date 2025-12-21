@@ -43,6 +43,8 @@ class MyBot(commands.Bot):
             "cogs.leveling",
             "cogs.pokemon",
             "cogs.music",
+            "cogs.admin",
+            "cogs.help",
         ]
 
         for extension in initial_extensions:

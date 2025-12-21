@@ -120,8 +120,8 @@ LEGENDARY_IDS = [
     1008,
 ]
 
-SHINY_CHANCE = 0.05  # 5% Chance
-LEGENDARY_CHANCE = 0.02  # 2% Chance
+SHINY_CHANCE = 0.02  # 2% Chance
+LEGENDARY_CHANCE = 0.05  # 5% Chance
 
 
 # --- HELPER: Image Collage ---
