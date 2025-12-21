@@ -524,13 +524,17 @@ class PokemonGame(commands.Cog):
             self.bot.db, interaction.user.id, interaction.user.name
         )
         async with self.bot.db.cursor() as cursor:
-            await cursor.execute("""
+            # FIX: Added (user_uuid,) tuple
+            await cursor.execute(
+                """
                 SELECT pokemon_id, pokemon_name, count(*) as count, sum(is_shiny) as shinies
                 FROM collection
                 WHERE user_uuid = ?
                 GROUP BY pokemon_id
                 ORDER BY pokemon_id ASC
-            """)
+            """,
+                (user_uuid,),
+            )
             rows = await cursor.fetchall()
         if not rows:
             await interaction.followup.send("Empty collection!")
@@ -547,12 +551,16 @@ class PokemonGame(commands.Cog):
             self.bot.db, interaction.user.id, interaction.user.name
         )
         async with self.bot.db.cursor() as cursor:
-            await cursor.execute("""
+            # FIX: Added (user_uuid,) tuple
+            await cursor.execute(
+                """
                 SELECT id, pokemon_id, pokemon_name, is_shiny, caught_at
                 FROM collection
                 WHERE user_uuid = ?
                 ORDER BY id DESC LIMIT 20
-            """)
+            """,
+                (user_uuid,),
+            )
             rows = await cursor.fetchall()
         if not rows:
             await interaction.followup.send("Your box is empty! Go catch some Pokemon.")
@@ -713,7 +721,6 @@ class PokemonGame(commands.Cog):
         db = self.bot.db
         results = []
         async with db.cursor() as cursor:
-            # 1. Force Add "is_shiny"
             try:
                 await cursor.execute(
                     "ALTER TABLE collection ADD COLUMN is_shiny BOOLEAN DEFAULT 0"
@@ -721,8 +728,6 @@ class PokemonGame(commands.Cog):
                 results.append("✅ Success: Added 'is_shiny' column.")
             except Exception as e:
                 results.append(f"ℹ️ Status shiny: {e}")
-
-            # 2. Force Add "is_legendary"
             try:
                 await cursor.execute(
                     "ALTER TABLE collection ADD COLUMN is_legendary BOOLEAN DEFAULT 0"
