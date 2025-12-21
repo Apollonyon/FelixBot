@@ -542,29 +542,51 @@ class PokemonGame(commands.Cog):
         view = PokedexView(rows, interaction.user.name)
         await interaction.followup.send(embed=view.get_embed(), view=view)
 
-    @pokemon_group.command(
-        name="box", description="List your Pokemon with their unique IDs"
-    )
-    async def box(self, interaction: discord.Interaction):
+    @pokemon_group.command(name="box", description="List your Pokemon IDs for trading")
+    @app_commands.describe(page="View older Pokemon (Page 2, 3, etc.)")
+    async def box(self, interaction: discord.Interaction, page: int = 1):
         await interaction.response.defer()
+        if page < 1:
+            page = 1
+
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
+
+        # Calculate Offset
+        limit = 20
+        offset = (page - 1) * limit
+
         async with self.bot.db.cursor() as cursor:
-            # FIX: Added (user_uuid,) tuple
+            # 1. Get Total Count (to know max pages)
+            await cursor.execute(
+                "SELECT count(*) FROM collection WHERE user_uuid = ?", (user_uuid,)
+            )
+            total_count = (await cursor.fetchone())[0]
+            max_pages = (total_count + limit - 1) // limit
+
+            if total_count == 0:
+                await interaction.followup.send("Your box is empty!")
+                return
+
+            if page > max_pages:
+                await interaction.followup.send(
+                    f"❌ You only have {max_pages} pages of Pokemon."
+                )
+                return
+
+            # 2. Get Specific Page
             await cursor.execute(
                 """
                 SELECT id, pokemon_id, pokemon_name, is_shiny, caught_at
                 FROM collection
                 WHERE user_uuid = ?
-                ORDER BY id DESC LIMIT 20
+                ORDER BY id DESC LIMIT ? OFFSET ?
             """,
-                (user_uuid,),
+                (user_uuid, limit, offset),
             )
             rows = await cursor.fetchall()
-        if not rows:
-            await interaction.followup.send("Your box is empty! Go catch some Pokemon.")
-            return
+
         desc = "Use these **IDs** to trade!\n\n"
         for row in rows:
             unique_id, p_id, name, shiny, date = row
@@ -572,11 +594,16 @@ class PokemonGame(commands.Cog):
             is_legendary = p_id in LEGENDARY_IDS
             bold = "**" if is_legendary else ""
             desc += f"`ID: {unique_id}` — {bold}{name}{bold} {icon}\n"
+
         embed = discord.Embed(
-            title=f"📦 {interaction.user.name}'s Storage (Last 20)",
+            title=f"📦 {interaction.user.name}'s Storage",
             description=desc,
             color=discord.Color.blue(),
         )
+        embed.set_footer(
+            text=f"Page {page} of {max_pages} • Total: {total_count} Pokemon"
+        )
+
         await interaction.followup.send(embed=embed)
 
     @pokemon_group.command(name="trade", description="Trade Pokemon with a friend")
