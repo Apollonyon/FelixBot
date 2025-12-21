@@ -1,14 +1,55 @@
 import asyncio
 import datetime
 import random
+from io import BytesIO
 
 import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+from PIL import Image  # New Library for processing images
 
-# IMPORTANT: We now pass the DB connection to this function
+# Import database connection
 from utils.database import get_or_create_uuid
+
+
+# --- HELPER: Image Collage Generator ---
+def generate_collage(images_bytes):
+    """
+    Takes a list of image bytes, creates a 5-column grid.
+    Sprites are usually 96x96. We'll make 100x100 slots.
+    """
+    if not images_bytes:
+        return None
+
+    # Settings
+    img_width, img_height = 96, 96
+    columns = 5
+    rows = (len(images_bytes) + columns - 1) // columns  # Calculate needed rows
+
+    # Create blank canvas (Transparent background)
+    canvas_width = columns * img_width
+    canvas_height = rows * img_height
+    canvas = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
+
+    for i, img_data in enumerate(images_bytes):
+        try:
+            # Open the image from bytes
+            with Image.open(BytesIO(img_data)) as img:
+                # Calculate position
+                x = (i % columns) * img_width
+                y = (i // columns) * img_height
+
+                # Paste onto canvas
+                canvas.paste(img, (x, y))
+        except Exception as e:
+            print(f"Error processing image {i}: {e}")
+
+    # Save to bytes to send to Discord
+    output_buffer = BytesIO()
+    canvas.save(output_buffer, format="PNG")
+    output_buffer.seek(0)  # Reset pointer to start
+    return output_buffer
 
 
 # --- VIEW (Buttons for Pokedex) ---
@@ -88,12 +129,10 @@ class PokemonGame(commands.Cog):
                 return await fetch(temp_session)
 
     # --- ECONOMY COMMANDS ---
-
     @pokemon_group.command(name="balance", description="Check your Coins and Pulls")
     async def balance(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        # FIX: Pass self.bot.db
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
@@ -112,65 +151,6 @@ class PokemonGame(commands.Cog):
         embed.add_field(name="Coins", value=f"🪙 **{coins}**", inline=True)
         embed.add_field(name="Pulls", value=f"📦 **{pulls}**", inline=True)
         await interaction.followup.send(embed=embed)
-
-    @pokemon_group.command(name="release", description="Sell Pokémon for 20 Coins each")
-    @app_commands.describe(
-        name="Name of the Pokémon", amount="How many to release? (Optional, Default: 1)"
-    )
-    async def release(
-        self, interaction: discord.Interaction, name: str, amount: int = 1
-    ):
-        await interaction.response.defer()
-        if amount < 1:
-            await interaction.followup.send("❌ Amount must be at least 1.")
-            return
-
-        # FIX: Pass self.bot.db
-        user_uuid = await get_or_create_uuid(
-            self.bot.db, interaction.user.id, interaction.user.name
-        )
-        pokemon_name = name.capitalize()
-
-        async with self.bot.db.cursor() as cursor:
-            # 1. Check ownership count
-            await cursor.execute(
-                "SELECT count(*) FROM collection WHERE user_uuid = ? AND pokemon_name = ?",
-                (user_uuid, pokemon_name),
-            )
-            count_row = await cursor.fetchone()
-            owned_count = count_row[0] if count_row else 0
-
-            if owned_count < amount:
-                await interaction.followup.send(
-                    f"❌ You only have **{owned_count}** {pokemon_name}(s). You cannot release {amount}."
-                )
-                return
-
-            # 2. Delete N specific rows
-            await cursor.execute(
-                """
-                DELETE FROM collection
-                WHERE id IN (
-                    SELECT id FROM collection
-                    WHERE user_uuid = ? AND pokemon_name = ?
-                    LIMIT ?
-                )
-            """,
-                (user_uuid, pokemon_name, amount),
-            )
-
-            # 3. Add Coins
-            sell_price = 20 * amount
-            await cursor.execute(
-                "UPDATE game_profile SET coins = coins + ? WHERE user_uuid = ?",
-                (sell_price, user_uuid),
-            )
-
-        # FIX: Commit the shared DB
-        await self.bot.db.commit()
-        await interaction.followup.send(
-            f"👋 You released **{amount}x {pokemon_name}**.\n💰 You received **{sell_price} Coins**."
-        )
 
     @pokemon_group.command(name="shop", description="Buy more pulls")
     async def shop(self, interaction: discord.Interaction):
@@ -200,8 +180,6 @@ class PokemonGame(commands.Cog):
         self, interaction: discord.Interaction, item: app_commands.Choice[str]
     ):
         await interaction.response.defer()
-
-        # FIX: Pass self.bot.db
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
@@ -237,8 +215,6 @@ class PokemonGame(commands.Cog):
     @pokemon_group.command(name="daily", description="Get 5 free pulls daily!")
     async def daily(self, interaction: discord.Interaction):
         await interaction.response.defer()
-
-        # FIX: Pass self.bot.db
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
@@ -287,7 +263,6 @@ class PokemonGame(commands.Cog):
             await interaction.followup.send("❌ Amount must be at least 1.")
             return
 
-        # FIX: Pass self.bot.db
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
@@ -311,10 +286,9 @@ class PokemonGame(commands.Cog):
                 (amount, user_uuid),
             )
 
-        # We commit the deduction immediately so they can't spam
         await self.bot.db.commit()
 
-        # Bulk Fetch (No DB here)
+        # Bulk Fetch
         async with aiohttp.ClientSession() as session:
             tasks = [self.fetch_random_pokemon(session) for _ in range(amount)]
             results = await asyncio.gather(*tasks)
@@ -327,17 +301,16 @@ class PokemonGame(commands.Cog):
             )
             return
 
-        # Save Pokemon to DB
+        # Save to DB
         async with self.bot.db.cursor() as cursor:
             for p in caught_pokemon:
                 await cursor.execute(
                     "INSERT INTO collection (user_uuid, pokemon_id, pokemon_name) VALUES (?, ?, ?)",
                     (user_uuid, p["id"], p["name"]),
                 )
-
         await self.bot.db.commit()
 
-        # Display Logic
+        # --- DISPLAY LOGIC ---
         if amount == 1:
             p = caught_pokemon[0]
             embed = discord.Embed(
@@ -349,9 +322,26 @@ class PokemonGame(commands.Cog):
             embed.set_footer(text=f"ID: #{p['id']}")
             await interaction.followup.send(embed=embed)
         else:
+            # MULTIPLE PULLS: Generate Collage
             desc = ""
             for p in caught_pokemon:
                 desc += f"• **#{p['id']} {p['name']}**\n"
+
+            # Download images for the collage
+            image_bytes_list = []
+            async with aiohttp.ClientSession() as session:
+                for p in caught_pokemon:
+                    if p["image"]:
+                        async with session.get(p["image"]) as resp:
+                            if resp.status == 200:
+                                image_bytes_list.append(await resp.read())
+
+            # Create the image file
+            collage_buffer = await asyncio.to_thread(generate_collage, image_bytes_list)
+
+            file = None
+            if collage_buffer:
+                file = discord.File(collage_buffer, filename="pulls.png")
 
             embed = discord.Embed(
                 title=f"🔥 You caught {len(caught_pokemon)} Pokémon!",
@@ -359,14 +349,17 @@ class PokemonGame(commands.Cog):
                 color=discord.Color.gold(),
             )
             embed.set_footer(text=f"Balls left: {pulls - amount}")
-            embed.set_thumbnail(url=caught_pokemon[-1]["image"])
-            await interaction.followup.send(embed=embed)
+
+            if file:
+                embed.set_image(url="attachment://pulls.png")
+                await interaction.followup.send(embed=embed, file=file)
+            else:
+                await interaction.followup.send(embed=embed)
 
     @pokemon_group.command(name="pokedex", description="View your collection")
     async def pokedex(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        # FIX: Pass self.bot.db
         user_uuid = await get_or_create_uuid(
             self.bot.db, interaction.user.id, interaction.user.name
         )
@@ -401,6 +394,63 @@ class PokemonGame(commands.Cog):
             f"**Progress: {unique} / 1025 Unique Species**\n" + embed.description
         )
         await interaction.followup.send(embed=embed, view=view)
+
+    @pokemon_group.command(name="release", description="Sell Pokémon for 20 Coins each")
+    @app_commands.describe(
+        name="Name of the Pokémon", amount="How many to release? (Optional, Default: 1)"
+    )
+    async def release(
+        self, interaction: discord.Interaction, name: str, amount: int = 1
+    ):
+        await interaction.response.defer()
+        if amount < 1:
+            await interaction.followup.send("❌ Amount must be at least 1.")
+            return
+
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
+        pokemon_name = name.capitalize()
+
+        async with self.bot.db.cursor() as cursor:
+            # 1. Check ownership count
+            await cursor.execute(
+                "SELECT count(*) FROM collection WHERE user_uuid = ? AND pokemon_name = ?",
+                (user_uuid, pokemon_name),
+            )
+            count_row = await cursor.fetchone()
+            owned_count = count_row[0] if count_row else 0
+
+            if owned_count < amount:
+                await interaction.followup.send(
+                    f"❌ You only have **{owned_count}** {pokemon_name}(s). You cannot release {amount}."
+                )
+                return
+
+            # 2. Delete N specific rows
+            await cursor.execute(
+                """
+                DELETE FROM collection
+                WHERE id IN (
+                    SELECT id FROM collection
+                    WHERE user_uuid = ? AND pokemon_name = ?
+                    LIMIT ?
+                )
+            """,
+                (user_uuid, pokemon_name, amount),
+            )
+
+            # 3. Add Coins
+            sell_price = 20 * amount
+            await cursor.execute(
+                "UPDATE game_profile SET coins = coins + ? WHERE user_uuid = ?",
+                (sell_price, user_uuid),
+            )
+
+        await self.bot.db.commit()
+        await interaction.followup.send(
+            f"👋 You released **{amount}x {pokemon_name}**.\n💰 You received **{sell_price} Coins**."
+        )
 
     @pokemon_group.command(name="potd", description="See the global Pokémon of the Day")
     async def potd(self, interaction: discord.Interaction):
@@ -445,7 +495,6 @@ class PokemonGame(commands.Cog):
     async def give_pulls(
         self, interaction: discord.Interaction, member: discord.Member, amount: int
     ):
-        # FIX: Pass self.bot.db
         user_uuid = await get_or_create_uuid(self.bot.db, member.id, member.name)
 
         async with self.bot.db.cursor() as cursor:
