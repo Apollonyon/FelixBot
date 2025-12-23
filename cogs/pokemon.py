@@ -195,7 +195,7 @@ def generate_collage(images_data, counts=None, names=None):
 
                     # THICK BLACK OUTLINE (Stroke)
                     # This is crucial for transparent backgrounds!
-                    stroke = 4 * scale  # Very thick stroke
+                    stroke = 3  # Very thick stroke
                     draw.text(
                         (text_x, text_y),
                         name_text,
