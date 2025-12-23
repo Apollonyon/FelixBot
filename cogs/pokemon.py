@@ -117,36 +117,62 @@ EVOLUTION_COST = 3  # You need 3 duplicates to evolve 1
 
 
 # --- HELPER: Image Collage ---
-def generate_collage(images_data, counts=None):
+# --- HELPER: Image Collage (Images + Counts + Names) ---
+def generate_collage(images_data, counts=None, names=None):
     if not images_data:
         return None
 
-    # Grid Settings
-    img_width, img_height = 96, 96
-    columns = 5  # 5 Wide for Pokedex
+    # Settings
+    sprite_size = 96
+    text_space = 20
+    cell_w = 110  # Wider to fit names
+    cell_h = sprite_size + text_space  # Taller
+
+    columns = 5
     rows = (len(images_data) + columns - 1) // columns
 
-    # Create transparent canvas
-    canvas = Image.new("RGBA", (columns * img_width, rows * img_height), (0, 0, 0, 0))
+    # Transparent Canvas
+    canvas = Image.new("RGBA", (columns * cell_w, rows * cell_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
 
     for i, (img_bytes, is_shiny) in enumerate(images_data):
         try:
             with Image.open(BytesIO(img_bytes)) as img:
                 img = img.convert("RGBA")
-                x = (i % columns) * img_width
-                y = (i // columns) * img_height
-                canvas.paste(img, (x, y), img)
 
-                # Draw "x3" count if provided (Only if > 1)
+                # Calculate Positions
+                col = i % columns
+                row = i // columns
+
+                x_base = col * cell_w
+                y_base = row * cell_h
+
+                # Center the sprite in the cell
+                sprite_x = x_base + (cell_w - sprite_size) // 2
+                canvas.paste(img, (sprite_x, y_base), img)
+
+                # 1. Draw Name (Centered at bottom)
+                if names and i < len(names):
+                    # Truncate long names to 13 chars so they don't overlap
+                    name_text = names[i][:13]
+
+                    # Approximate centering (since we don't have font metrics easily)
+                    # Assuming default font is approx 6px wide per char
+                    text_width_est = len(name_text) * 6
+                    text_x = x_base + (cell_w - text_width_est) // 2
+
+                    # Draw White Text
+                    draw.text((text_x, y_base + 96), name_text, fill="white")
+
+                # 2. Draw Count (x3)
                 if counts and i < len(counts) and counts[i] > 1:
-                    text = f"x{counts[i]}"
-                    # Draw text in bottom right corner of the slot
+                    count_text = f"x{counts[i]}"
+                    # Draw in top-right corner of the sprite
                     draw.text(
-                        (x + 65, y + 75),
-                        text,
-                        fill="white",
-                        stroke_width=2,
+                        (sprite_x + 75, y_base + 5),
+                        count_text,
+                        fill="#00ff00",
+                        stroke_width=1,
                         stroke_fill="black",
                     )
 
@@ -210,7 +236,7 @@ class BoxView(discord.ui.View):
         await interaction.response.edit_message(embed=self.get_embed())
 
 
-# --- VIEW: Pokedex (Summary) ---
+# --- VIEW: Visual Pokedex ---
 class PokedexView(discord.ui.View):
     def __init__(self, full_data, user_name):
         super().__init__(timeout=60)
@@ -224,28 +250,30 @@ class PokedexView(discord.ui.View):
         end = start + self.items_per_page
         page_data = self.full_data[start:end]
 
-        # Fetch all images for this page concurrently
         image_tasks = []
         counts = []
+        names = []  # <--- New List
 
         async with aiohttp.ClientSession() as session:
             for row in page_data:
-                poke_id, _, count, _ = row
+                # Row format: (id, name, count, shinies)
+                poke_id, poke_name, count, shinies = row
+
                 counts.append(count)
-                # We always fetch the sprite (shiny if they have at least 1 shiny?)
-                # For pokedex, let's just show standard sprite to keep it clean, or shiny if is_shiny sum > 0
-                is_shiny_display = row[3] > 0
+                names.append(poke_name)  # <--- Save Name
+
+                # Show Shiny sprite if they have ANY shinies of this species
+                is_shiny_display = shinies > 0
                 url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{'shiny/' if is_shiny_display else ''}{poke_id}.png"
                 image_tasks.append(session.get(url))
 
             responses = await asyncio.gather(*image_tasks)
             image_bytes = [await r.read() for r in responses if r.status == 200]
 
-            # Since some requests might fail, we align counts carefully or just pass raw list
-            # For simplicity in this tutorial, we assume all API calls succeed (PokeAPI is reliable)
             collage_data = [(b, False) for b in image_bytes]
 
-        return await asyncio.to_thread(generate_collage, collage_data, counts)
+        # Pass names to the helper
+        return await asyncio.to_thread(generate_collage, collage_data, counts, names)
 
     async def update_message(self, interaction):
         await interaction.response.defer()
