@@ -117,60 +117,71 @@ EVOLUTION_COST = 3  # You need 3 duplicates to evolve 1
 
 
 # --- HELPER: Image Collage ---
+# --- HELPER: Image Collage (HD + Transparent) ---
 def generate_collage(images_data, counts=None, names=None):
     if not images_data:
         return None
 
-    # HD Settings (2x Scale)
-    scale_factor = 2
-    sprite_size = 96 * scale_factor  # 192px
-    cell_w = 120 * scale_factor  # 240px wide
-    cell_h = (96 + 40) * scale_factor  # Taller for text
+    # 1. MASSIVE SCALING (3x)
+    # This makes the image huge so Discord's preview looks sharp.
+    scale = 3
+    sprite_size = 96 * scale  # 288px
+    text_height = 40 * scale  # Space for text
+    cell_w = 120 * scale  # 360px wide
+    cell_h = sprite_size + text_height
 
     columns = 5
     rows = (len(images_data) + columns - 1) // columns
 
-    # Dark Background
-    bg_color = (44, 47, 51, 255)
-    canvas = Image.new("RGBA", (columns * cell_w, rows * cell_h), bg_color)
+    # 2. TRANSPARENT BACKGROUND
+    # (0, 0, 0, 0) = Fully Transparent
+    canvas = Image.new("RGBA", (columns * cell_w, rows * cell_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
 
-    # Load a much bigger font (Size 28-30)
+    # 3. LOAD A HUGE FONT
+    # We need a size around 40-50px for this resolution
+    font = None
     try:
+        # Linux / VPS standard
         font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 45
         )
     except:
         try:
-            font = ImageFont.truetype("arial.ttf", 28)
+            # Windows standard
+            font = ImageFont.truetype("arial.ttf", 45)
         except:
-            # Fallback (This might still be small on some systems, but the scaling helps)
-            font = ImageFont.load_default()
+            pass  # Fallback to default (will look tiny, but code won't crash)
+
+    # If font failed to load, we use default but it will be small.
+    # We print a warning to your console so you know.
+    if not font:
+        print("⚠️ WARNING: Could not load a custom font. Text will be tiny.")
+        font = ImageFont.load_default()
 
     for i, (img_bytes, is_shiny) in enumerate(images_data):
         try:
             with Image.open(BytesIO(img_bytes)) as img:
                 img = img.convert("RGBA")
 
-                # 1. SCALE UP THE SPRITE
-                # Image.NEAREST keeps pixel art looking crisp (not blurry)
+                # Resize sprite with NEAREST NEIGHBOR (keeps pixel art crisp)
                 img = img.resize((sprite_size, sprite_size), resample=Image.NEAREST)
 
-                # Calculate Positions
+                # Math for grid position
                 col = i % columns
                 row = i // columns
                 x_base = col * cell_w
                 y_base = row * cell_h
 
-                # Center sprite horizontally
+                # Center sprite
                 sprite_x = x_base + (cell_w - sprite_size) // 2
                 canvas.paste(img, (sprite_x, y_base), img)
 
-                # 2. DRAW NAME (Big & Sharp)
+                # --- DRAW NAME ---
                 if names and i < len(names):
-                    name_text = names[i][:13]
+                    name_text = names[i][:13]  # Limit to 13 chars
 
-                    # Calculate center
+                    # Calculate text width
                     try:
                         bbox = draw.textbbox((0, 0), name_text, font=font)
                         text_w = bbox[2] - bbox[0]
@@ -178,27 +189,36 @@ def generate_collage(images_data, counts=None, names=None):
                         text_w = draw.textlength(name_text, font=font)
 
                     text_x = x_base + (cell_w - text_w) // 2
+                    text_y = (
+                        y_base + sprite_size - (10 * scale)
+                    )  # Tuck it just under the feet
 
-                    # Draw with Thick Outline
-                    # y_base + sprite_size - 10 moves text up slightly closer to pokemon
+                    # THICK BLACK OUTLINE (Stroke)
+                    # This is crucial for transparent backgrounds!
+                    stroke = 4 * scale  # Very thick stroke
                     draw.text(
-                        (text_x, y_base + sprite_size - 10),
+                        (text_x, text_y),
                         name_text,
                         font=font,
                         fill="white",
-                        stroke_width=3,
+                        stroke_width=stroke,
                         stroke_fill="black",
                     )
 
-                # 3. DRAW COUNT (Big Green Text)
+                # --- DRAW COUNT (x3) ---
                 if counts and i < len(counts) and counts[i] > 1:
                     count_text = f"x{counts[i]}"
+                    # Top Right Corner
+                    cx = x_base + cell_w - (30 * scale)
+                    cy = y_base + (10 * scale)
+
+                    # Green text, black border
                     draw.text(
-                        (x_base + cell_w - 60, y_base + 10),
+                        (cx, cy),
                         count_text,
                         font=font,
                         fill="#00ff00",
-                        stroke_width=3,
+                        stroke_width=stroke,
                         stroke_fill="black",
                     )
 
