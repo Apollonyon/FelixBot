@@ -767,15 +767,19 @@ class PokemonGame(commands.Cog):
                     f"❌ Not enough pulls! You have {pulls}."
                 )
                 return
+            remaining_pulls = pulls - amount
             await cursor.execute(
                 "UPDATE game_profile SET available_pulls = available_pulls - ? WHERE user_uuid = ?",
                 (amount, user_uuid),
             )
         await self.bot.db.commit()
+        # Fetching pokemon
         async with aiohttp.ClientSession() as session:
             tasks = [self.fetch_pokemon(session) for _ in range(amount)]
             results = await asyncio.gather(*tasks)
         caught = [p for p in results if p is not None]
+
+        # Saving to the database
         async with self.bot.db.cursor() as cursor:
             for p in caught:
                 await cursor.execute(
@@ -783,6 +787,8 @@ class PokemonGame(commands.Cog):
                     (user_uuid, p["id"], p["name"], p["is_shiny"], p["is_legendary"]),
                 )
         await self.bot.db.commit()
+
+        # Displaying the results aka caught pokemon
         if amount == 1:
             p = caught[0]
             name_display = f"✨ {p['name']} ✨" if p["is_shiny"] else p["name"]
@@ -795,10 +801,11 @@ class PokemonGame(commands.Cog):
             )
             embed = discord.Embed(title=f"You caught {name_display}!", color=color)
             embed.set_image(url=p["image_url"])
+            footer_text = f" Remaining Pulls: {remaining_pulls}"
             if p["is_legendary"]:
-                embed.set_footer(text="🔥 LEGENDARY PULL!")
+                embed.set_footer(text=footer_text + " 🔥 LEGENDARY PULL!")
             if p["is_shiny"]:
-                embed.set_footer(text="✨ SHINY PULL!")
+                embed.set_footer(text=footer_text + " ✨ SHINY PULL!")
             await interaction.followup.send(embed=embed)
         else:
             desc = ""
@@ -820,6 +827,7 @@ class PokemonGame(commands.Cog):
             embed = discord.Embed(
                 title=f"🔥 Pull Results", description=desc, color=discord.Color.gold()
             )
+            embed.set_footer(text=f"Remaining Pulls: {remaining_pulls}")
             if file:
                 embed.set_image(url="attachment://pulls.png")
                 await interaction.followup.send(embed=embed, file=file)
