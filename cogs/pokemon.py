@@ -196,6 +196,43 @@ class BoxView(discord.ui.View):
         await interaction.response.edit_message(embed=self.get_embed())
 
 
+# --- VIEW: Pokedex (Summary) ---
+class PokedexView(discord.ui.View):
+    def __init__(self, pokemon_list, user_name):
+        super().__init__(timeout=60)
+        self.pokemon_list = pokemon_list
+        self.user_name = user_name
+        self.index = 0
+
+    def get_embed(self):
+        poke_id, poke_name, count, shinies = self.pokemon_list[self.index]
+        image_url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{poke_id}.png"
+
+        embed = discord.Embed(
+            title=f"📖 Pokedex: {self.user_name}", color=discord.Color.red()
+        )
+        shiny_text = f" (✨ {shinies})" if shinies > 0 else ""
+        embed.description = f"**#{poke_id} {poke_name}**"
+        embed.add_field(name="Times Caught", value=f"{count}{shiny_text}", inline=True)
+        embed.set_image(url=image_url)
+        embed.set_footer(text=f"Page {self.index + 1} of {len(self.pokemon_list)}")
+        return embed
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.primary)
+    async def previous_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        self.index = self.index - 1 if self.index > 0 else len(self.pokemon_list) - 1
+        await interaction.response.edit_message(embed=self.get_embed())
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.primary)
+    async def next_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        self.index = self.index + 1 if self.index < len(self.pokemon_list) - 1 else 0
+        await interaction.response.edit_message(embed=self.get_embed())
+
+
 # --- VIEW: Trade Confirmation ---
 class TradeView(discord.ui.View):
     def __init__(self, bot, author, partner, author_poke_id, partner_poke_id):
@@ -495,6 +532,34 @@ class PokemonGame(commands.Cog):
             )
         await self.bot.db.commit()
         await interaction.followup.send(f"✅ ID `{id}` is now **{name}**!")
+
+    @pokemon_group.command(name="pokedex", description="View your collection summary")
+    async def pokedex(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_uuid = await get_or_create_uuid(
+            self.bot.db, interaction.user.id, interaction.user.name
+        )
+
+        async with self.bot.db.cursor() as cursor:
+            # Group by Pokemon ID to count duplicates
+            await cursor.execute(
+                """
+                SELECT pokemon_id, pokemon_name, count(*) as count, sum(is_shiny) as shinies
+                FROM collection
+                WHERE user_uuid = ?
+                GROUP BY pokemon_id
+                ORDER BY pokemon_id ASC
+            """,
+                (user_uuid,),
+            )
+            rows = await cursor.fetchall()
+
+            if not rows:
+                await interaction.followup.send("Empty collection!")
+                return
+
+            view = PokedexView(rows, interaction.user.name)
+            await interaction.followup.send(embed=view.get_embed(), view=view)
 
     @pokemon_group.command(name="buddy", description="Set your Partner Pokemon")
     @app_commands.describe(id="The ID from /pokemon box")
