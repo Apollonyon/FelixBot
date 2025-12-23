@@ -7,7 +7,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from utils.database import get_or_create_uuid
 
@@ -117,17 +117,18 @@ EVOLUTION_COST = 3  # You need 3 duplicates to evolve 1
 
 
 # --- HELPER: Image Collage ---
-def generate_collage(images_data):
+def generate_collage(images_data, counts=None):
     if not images_data:
         return None
 
+    # Grid Settings
     img_width, img_height = 96, 96
-    columns = 3
+    columns = 5  # 5 Wide for Pokedex
     rows = (len(images_data) + columns - 1) // columns
 
-    canvas_width = columns * img_width
-    canvas_height = rows * img_height
-    canvas = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
+    # Create transparent canvas
+    canvas = Image.new("RGBA", (columns * img_width, rows * img_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
 
     for i, (img_bytes, is_shiny) in enumerate(images_data):
         try:
@@ -136,8 +137,21 @@ def generate_collage(images_data):
                 x = (i % columns) * img_width
                 y = (i // columns) * img_height
                 canvas.paste(img, (x, y), img)
+
+                # Draw "x3" count if provided (Only if > 1)
+                if counts and i < len(counts) and counts[i] > 1:
+                    text = f"x{counts[i]}"
+                    # Draw text in bottom right corner of the slot
+                    draw.text(
+                        (x + 65, y + 75),
+                        text,
+                        fill="white",
+                        stroke_width=2,
+                        stroke_fill="black",
+                    )
+
         except Exception as e:
-            print(f"Error processing image {i}: {e}")
+            print(f"Image error: {e}")
 
     output_buffer = BytesIO()
     canvas.save(output_buffer, format="PNG")
