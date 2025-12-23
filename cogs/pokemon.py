@@ -118,56 +118,43 @@ EVOLUTION_COST = 3  # You need 3 duplicates to evolve 1
 
 # --- HELPER: Image Collage ---
 # --- HELPER: Image Collage (HD + Transparent) ---
+# --- HELPER: Image Collage (Clean HD) ---
 def generate_collage(images_data, counts=None, names=None):
     if not images_data:
         return None
 
-    # 1. MASSIVE SCALING (3x)
-    # This makes the image huge so Discord's preview looks sharp.
+    # 1. HD SCALE (3x)
     scale = 3
-    sprite_size = 96 * scale  # 288px
-    text_height = 40 * scale  # Space for text
-    cell_w = 120 * scale  # 360px wide
+    sprite_size = 96 * scale
+    text_height = 40 * scale
+    cell_w = 120 * scale
     cell_h = sprite_size + text_height
 
     columns = 5
     rows = (len(images_data) + columns - 1) // columns
 
-    # 2. TRANSPARENT BACKGROUND
-    # (0, 0, 0, 0) = Fully Transparent
+    # Transparent Background
     canvas = Image.new("RGBA", (columns * cell_w, rows * cell_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
 
-    # 3. LOAD A HUGE FONT
-    # We need a size around 40-50px for this resolution
+    # Load Font
     font = None
     try:
-        # Linux / VPS standard
         font = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 45
         )
     except:
         try:
-            # Windows standard
             font = ImageFont.truetype("arial.ttf", 45)
         except:
-            pass  # Fallback to default (will look tiny, but code won't crash)
-
-    # If font failed to load, we use default but it will be small.
-    # We print a warning to your console so you know.
-    if not font:
-        print("⚠️ WARNING: Could not load a custom font. Text will be tiny.")
-        font = ImageFont.load_default()
+            font = ImageFont.load_default()
 
     for i, (img_bytes, is_shiny) in enumerate(images_data):
         try:
             with Image.open(BytesIO(img_bytes)) as img:
                 img = img.convert("RGBA")
-
-                # Resize sprite with NEAREST NEIGHBOR (keeps pixel art crisp)
                 img = img.resize((sprite_size, sprite_size), resample=Image.NEAREST)
 
-                # Math for grid position
                 col = i % columns
                 row = i // columns
                 x_base = col * cell_w
@@ -177,11 +164,10 @@ def generate_collage(images_data, counts=None, names=None):
                 sprite_x = x_base + (cell_w - sprite_size) // 2
                 canvas.paste(img, (sprite_x, y_base), img)
 
-                # --- DRAW NAME ---
+                # --- DRAW NAME (Subtle Outline) ---
                 if names and i < len(names):
-                    name_text = names[i][:13]  # Limit to 13 chars
+                    name_text = names[i][:13]
 
-                    # Calculate text width
                     try:
                         bbox = draw.textbbox((0, 0), name_text, font=font)
                         text_w = bbox[2] - bbox[0]
@@ -189,13 +175,10 @@ def generate_collage(images_data, counts=None, names=None):
                         text_w = draw.textlength(name_text, font=font)
 
                     text_x = x_base + (cell_w - text_w) // 2
-                    text_y = (
-                        y_base + sprite_size - (10 * scale)
-                    )  # Tuck it just under the feet
+                    text_y = y_base + sprite_size - (10 * scale)
 
-                    # THICK BLACK OUTLINE (Stroke)
-                    # This is crucial for transparent backgrounds!
-                    stroke = 3  # Very thick stroke
+                    # CHANGED: Stroke is now much thinner (3px instead of 12px)
+                    stroke = scale
                     draw.text(
                         (text_x, text_y),
                         name_text,
@@ -205,14 +188,13 @@ def generate_collage(images_data, counts=None, names=None):
                         stroke_fill="black",
                     )
 
-                # --- DRAW COUNT (x3) ---
+                # --- DRAW COUNT ---
                 if counts and i < len(counts) and counts[i] > 1:
                     count_text = f"x{counts[i]}"
-                    # Top Right Corner
                     cx = x_base + cell_w - (30 * scale)
                     cy = y_base + (10 * scale)
 
-                    # Green text, black border
+                    # Thinner stroke here too
                     draw.text(
                         (cx, cy),
                         count_text,
