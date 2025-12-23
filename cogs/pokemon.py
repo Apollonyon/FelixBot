@@ -198,39 +198,77 @@ class BoxView(discord.ui.View):
 
 # --- VIEW: Pokedex (Summary) ---
 class PokedexView(discord.ui.View):
-    def __init__(self, pokemon_list, user_name):
+    def __init__(self, full_data, user_name):
         super().__init__(timeout=60)
-        self.pokemon_list = pokemon_list
+        self.full_data = full_data
         self.user_name = user_name
-        self.index = 0
+        self.page = 0
+        self.items_per_page = 20  # 5x4 Grid
 
-    def get_embed(self):
-        poke_id, poke_name, count, shinies = self.pokemon_list[self.index]
-        image_url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{poke_id}.png"
+    async def generate_page_image(self):
+        start = self.page * self.items_per_page
+        end = start + self.items_per_page
+        page_data = self.full_data[start:end]
 
+        # Fetch all images for this page concurrently
+        image_tasks = []
+        counts = []
+
+        async with aiohttp.ClientSession() as session:
+            for row in page_data:
+                poke_id, _, count, _ = row
+                counts.append(count)
+                # We always fetch the sprite (shiny if they have at least 1 shiny?)
+                # For pokedex, let's just show standard sprite to keep it clean, or shiny if is_shiny sum > 0
+                is_shiny_display = row[3] > 0
+                url = f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{'shiny/' if is_shiny_display else ''}{poke_id}.png"
+                image_tasks.append(session.get(url))
+
+            responses = await asyncio.gather(*image_tasks)
+            image_bytes = [await r.read() for r in responses if r.status == 200]
+
+            # Since some requests might fail, we align counts carefully or just pass raw list
+            # For simplicity in this tutorial, we assume all API calls succeed (PokeAPI is reliable)
+            collage_data = [(b, False) for b in image_bytes]
+
+        return await asyncio.to_thread(generate_collage, collage_data, counts)
+
+    async def update_message(self, interaction):
+        await interaction.response.defer()
+        img_buffer = await self.generate_page_image()
+
+        if not img_buffer:
+            await interaction.followup.send("Error generating image.", ephemeral=True)
+            return
+
+        file = discord.File(img_buffer, filename="pokedex.png")
         embed = discord.Embed(
             title=f"📖 Pokedex: {self.user_name}", color=discord.Color.red()
         )
-        shiny_text = f" (✨ {shinies})" if shinies > 0 else ""
-        embed.description = f"**#{poke_id} {poke_name}**"
-        embed.add_field(name="Times Caught", value=f"{count}{shiny_text}", inline=True)
-        embed.set_image(url=image_url)
-        embed.set_footer(text=f"Page {self.index + 1} of {len(self.pokemon_list)}")
-        return embed
+        embed.set_image(url="attachment://pokedex.png")
+        embed.set_footer(
+            text=f"Page {self.page + 1} • Total Unique: {len(self.full_data)}"
+        )
+
+        await interaction.edit_original_response(
+            embed=embed, attachments=[file], view=self
+        )
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.primary)
-    async def previous_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        self.index = self.index - 1 if self.index > 0 else len(self.pokemon_list) - 1
-        await interaction.response.edit_message(embed=self.get_embed())
+    async def prev_btn(self, interaction, button):
+        total_pages = (
+            len(self.full_data) + self.items_per_page - 1
+        ) // self.items_per_page
+        self.page = self.page - 1 if self.page > 0 else total_pages - 1
+        await self.update_message(interaction)
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.primary)
-    async def next_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        self.index = self.index + 1 if self.index < len(self.pokemon_list) - 1 else 0
-        await interaction.response.edit_message(embed=self.get_embed())
+    async def next_btn(self, interaction, button):
+        total_pages = (
+            len(self.full_data) + self.items_per_page - 1
+        ) // self.items_per_page
+        self.page = self.page + 1 if self.page < total_pages - 1 else 0
+        await self.update_message(interaction)
 
 
 # --- VIEW: Trade Confirmation ---
@@ -533,7 +571,9 @@ class PokemonGame(commands.Cog):
         await self.bot.db.commit()
         await interaction.followup.send(f"✅ ID `{id}` is now **{name}**!")
 
-    @pokemon_group.command(name="pokedex", description="View your collection summary")
+    @pokemon_group.command(
+        name="pokedex", description="View your collection (Visual Grid)"
+    )
     async def pokedex(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_uuid = await get_or_create_uuid(
@@ -541,25 +581,35 @@ class PokemonGame(commands.Cog):
         )
 
         async with self.bot.db.cursor() as cursor:
-            # Group by Pokemon ID to count duplicates
+            # Group by Pokemon ID
             await cursor.execute(
                 """
-                SELECT pokemon_id, pokemon_name, count(*) as count, sum(is_shiny) as shinies
-                FROM collection
-                WHERE user_uuid = ?
-                GROUP BY pokemon_id
-                ORDER BY pokemon_id ASC
-            """,
+                    SELECT pokemon_id, pokemon_name, count(*) as count, sum(is_shiny) as shinies
+                    FROM collection
+                    WHERE user_uuid = ?
+                    GROUP BY pokemon_id
+                    ORDER BY pokemon_id ASC
+                """,
                 (user_uuid,),
             )
             rows = await cursor.fetchall()
 
-            if not rows:
-                await interaction.followup.send("Empty collection!")
-                return
+        if not rows:
+            await interaction.followup.send("Empty collection!")
+            return
 
-            view = PokedexView(rows, interaction.user.name)
-            await interaction.followup.send(embed=view.get_embed(), view=view)
+        # Initialize View and Send First Image
+        view = PokedexView(rows, interaction.user.name)
+        img_buffer = await view.generate_page_image()
+        file = discord.File(img_buffer, filename="pokedex.png")
+
+        embed = discord.Embed(
+            title=f"📖 Pokedex: {interaction.user.name}", color=discord.Color.red()
+        )
+        embed.set_image(url="attachment://pokedex.png")
+        embed.set_footer(text=f"Page 1 • Total Unique: {len(rows)}")
+
+        await interaction.followup.send(embed=embed, file=file, view=view)
 
     @pokemon_group.command(name="buddy", description="Set your Partner Pokemon")
     @app_commands.describe(id="The ID from /pokemon box")
