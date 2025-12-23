@@ -117,62 +117,88 @@ EVOLUTION_COST = 3  # You need 3 duplicates to evolve 1
 
 
 # --- HELPER: Image Collage ---
-# --- HELPER: Image Collage (Images + Counts + Names) ---
 def generate_collage(images_data, counts=None, names=None):
     if not images_data:
         return None
 
-    # Settings
-    sprite_size = 96
-    text_space = 20
-    cell_w = 110  # Wider to fit names
-    cell_h = sprite_size + text_space  # Taller
+    # HD Settings (2x Scale)
+    scale_factor = 2
+    sprite_size = 96 * scale_factor  # 192px
+    cell_w = 120 * scale_factor  # 240px wide
+    cell_h = (96 + 40) * scale_factor  # Taller for text
 
     columns = 5
     rows = (len(images_data) + columns - 1) // columns
 
-    # Transparent Canvas
-    canvas = Image.new("RGBA", (columns * cell_w, rows * cell_h), (0, 0, 0, 0))
+    # Dark Background
+    bg_color = (44, 47, 51, 255)
+    canvas = Image.new("RGBA", (columns * cell_w, rows * cell_h), bg_color)
     draw = ImageDraw.Draw(canvas)
+
+    # Load a much bigger font (Size 28-30)
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28
+        )
+    except:
+        try:
+            font = ImageFont.truetype("arial.ttf", 28)
+        except:
+            # Fallback (This might still be small on some systems, but the scaling helps)
+            font = ImageFont.load_default()
 
     for i, (img_bytes, is_shiny) in enumerate(images_data):
         try:
             with Image.open(BytesIO(img_bytes)) as img:
                 img = img.convert("RGBA")
 
+                # 1. SCALE UP THE SPRITE
+                # Image.NEAREST keeps pixel art looking crisp (not blurry)
+                img = img.resize((sprite_size, sprite_size), resample=Image.NEAREST)
+
                 # Calculate Positions
                 col = i % columns
                 row = i // columns
-
                 x_base = col * cell_w
                 y_base = row * cell_h
 
-                # Center the sprite in the cell
+                # Center sprite horizontally
                 sprite_x = x_base + (cell_w - sprite_size) // 2
                 canvas.paste(img, (sprite_x, y_base), img)
 
-                # 1. Draw Name (Centered at bottom)
+                # 2. DRAW NAME (Big & Sharp)
                 if names and i < len(names):
-                    # Truncate long names to 13 chars so they don't overlap
                     name_text = names[i][:13]
 
-                    # Approximate centering (since we don't have font metrics easily)
-                    # Assuming default font is approx 6px wide per char
-                    text_width_est = len(name_text) * 6
-                    text_x = x_base + (cell_w - text_width_est) // 2
+                    # Calculate center
+                    try:
+                        bbox = draw.textbbox((0, 0), name_text, font=font)
+                        text_w = bbox[2] - bbox[0]
+                    except:
+                        text_w = draw.textlength(name_text, font=font)
 
-                    # Draw White Text
-                    draw.text((text_x, y_base + 96), name_text, fill="white")
+                    text_x = x_base + (cell_w - text_w) // 2
 
-                # 2. Draw Count (x3)
+                    # Draw with Thick Outline
+                    # y_base + sprite_size - 10 moves text up slightly closer to pokemon
+                    draw.text(
+                        (text_x, y_base + sprite_size - 10),
+                        name_text,
+                        font=font,
+                        fill="white",
+                        stroke_width=3,
+                        stroke_fill="black",
+                    )
+
+                # 3. DRAW COUNT (Big Green Text)
                 if counts and i < len(counts) and counts[i] > 1:
                     count_text = f"x{counts[i]}"
-                    # Draw in top-right corner of the sprite
                     draw.text(
-                        (sprite_x + 75, y_base + 5),
+                        (x_base + cell_w - 60, y_base + 10),
                         count_text,
+                        font=font,
                         fill="#00ff00",
-                        stroke_width=1,
+                        stroke_width=3,
                         stroke_fill="black",
                     )
 
